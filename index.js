@@ -37,13 +37,13 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const PACKAGE = 'dsh-workspace-control';
-const NAMESPACE = 'workspaceManager';
+const NAMESPACE = 'workspaceControl';
 
 const PACKAGE_DIR = dirname(fileURLToPath(import.meta.url));
-// `WSM_LOG_PATH` lets a test run keep its noise out of the installed plugin's
+// `WSC_LOG_PATH` lets a test run keep its noise out of the installed plugin's
 // log while the default stays next to the sources.
-const LOG_PATH = process.env.WSM_LOG_PATH || join(PACKAGE_DIR, '.workspace-manager.log');
-const PENDING_PATH = join(PACKAGE_DIR, '.workspace-manager-pending.json');
+const LOG_PATH = process.env.WSC_LOG_PATH || join(PACKAGE_DIR, '.workspace-control.log');
+const PENDING_PATH = join(PACKAGE_DIR, '.workspace-control-pending.json');
 
 /** Diagnostics are append-only, so the file is capped and rolled over instead of
  * growing for the lifetime of the installation. */
@@ -52,7 +52,7 @@ const LOG_CHECK_EVERY = 200;
 
 /** Suffix of a parked session directory. It is not part of the store layout, so
  * a leftover copy is inert and a failed publish can always be renamed back. */
-const PARK_MARK = '.workspace-manager-parked-';
+const PARK_MARK = '.workspace-control-parked-';
 
 /** Delay before the membership self-heal runs: the registry has rebuilt its
  * canonical-cwd index by then, which is what refused the attach last run. */
@@ -178,7 +178,7 @@ function method(name, parameters) {
     namespace: NAMESPACE,
     method: name,
     invocation: { kind: 'direct' },
-    result: jsonValue('WorkspaceManagerResult'),
+    result: jsonValue('WorkspaceControlResult'),
     parameters: parameters.map((parameter) => ({
       name: parameter.wire,
       wire: parameter.wire,
@@ -356,7 +356,7 @@ const describe = (error) =>
 
 /* ------------------------------------------------------------------- service */
 
-class WorkspaceManager {
+class WorkspaceControl {
   /** The gateway reads this binding to reach the service behind the namespace. */
   typertRemote = Object.freeze({
     service: this,
@@ -1938,7 +1938,7 @@ class WorkspaceManager {
  * Exported for the test suite only: the pure path helpers and the service class
  * are driven directly, without a Cordis context.
  */
-export { WorkspaceManager, encodeId, lastSegment, pathKey, samePath, titleFollowsPath };
+export { WorkspaceControl, encodeId, lastSegment, pathKey, samePath, titleFollowsPath };
 
 /** `tools` is deliberately *not* required: the plugin works without it, and a
  * missing required service would keep the whole entry inactive (silently). */
@@ -1975,7 +1975,7 @@ const plain = (value) => {
 };
 
 const TOOL = {
-  name: 'workspace_manager',
+  name: 'workspace_control',
   description:
     'Manage stored sessions and workspaces without losing ids, titles, history or tool records. action=inspect reports one session; action=move relocates one session to `target`; action=listWorkspaces reports every workspace with its stored-session count and how many of those are held by the app or mid-turn; action=rebuild re-homes a whole workspace onto `target` and replaces the record there; action=merge folds the workspaces in `sourceIds` into `workspaceId`; action=retitle renames one workspace; action=remove deletes one workspace record (its sessions are archived first unless keepSessions is true). Held or mid-turn sessions refuse the whole call first, and nothing moves when the pre-flight fails.',
   parameters: {
@@ -2043,7 +2043,7 @@ function applyEntry(ctx) {
     agents: typeof peek(ctx, 'agents'),
   });
 
-  const service = new WorkspaceManager(ctx);
+  const service = new WorkspaceControl(ctx);
   ctx.provide(NAMESPACE, service);
 
   // Every registration is disposable: the plugin is reloaded in place with

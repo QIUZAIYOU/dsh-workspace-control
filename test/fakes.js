@@ -14,8 +14,8 @@ import { join } from 'node:path';
 /** Make `sessionRoots()` resolve to a throwaway harness home. */
 export async function makeHarnessHome() {
   // Keep the plugin's own log out of the installed tree while tests run.
-  process.env.WSM_LOG_PATH = join(tmpdir(), `wsm-test-${process.pid}.log`);
-  const home = await mkdtemp(join(tmpdir(), 'wsm-test-'));
+  process.env.WSC_LOG_PATH = join(tmpdir(), `wsc-test-${process.pid}.log`);
+  const home = await mkdtemp(join(tmpdir(), 'wsc-test-'));
   process.env.DSH_HOME = home;
   await mkdir(join(home, 'sessions'), { recursive: true });
   return {

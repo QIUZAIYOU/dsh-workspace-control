@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Workspace Manager",
+    "title": "Workspace Control",
     "description": "Manages workspaces in one panel: rename, delete, rebuild onto another directory, merge, and move single sessions between them — keeping history, titles and tool records."
   }
 }

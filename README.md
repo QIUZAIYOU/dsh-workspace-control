@@ -1,4 +1,6 @@
-# Workspace Manager
+# dsh-workspace-control
+
+A DeepSeek Harness plugin for workspace-level maintenance: rename, delete, rebuild onto another directory, merge, and move single sessions between workspaces.
 
 One panel for DeepSeek Harness workspaces: rename, delete, rebuild onto another
 directory, merge, and move single sessions between them — without losing
@@ -8,8 +10,8 @@ plugin does that through the supported persistence seam.
 
 ## What it does
 
-The manager lives in its own central panel, opened from its icon in the sidebar's
-panel row (工作区管理 / Workspace manager):
+The panel lives in its own central view, opened from its icon in the sidebar's
+panel row (工作区管理 / Workspaces):
 
 | Action | What happens |
 | --- | --- |
@@ -124,7 +126,7 @@ one restart, not a second click.
 Both halves also refuse to break application start: a throwing Client factory
 degrades to an absent plugin instead of failing the Web boot gate (which fails
 the whole app with `1 entry did not activate`), and a throwing Host `apply` is
-logged to `.workspace-manager.log` instead of failing the entry.
+logged to `.workspace-control.log` instead of failing the entry.
 
 ### The workspace title follows its directory, unless you renamed it
 
@@ -142,8 +144,8 @@ supported `Workspace#setTitle` and needs no restart.
 
 ## Install
 
-From npm — the published package is `dsh-workspace-control`; the repository is
-named after the panel it ships:
+From npm — the package, the repository and the plugin entry all use one name,
+`dsh-workspace-control`:
 
 ```bash
 dsh plugin --profile web add dsh-workspace-control
@@ -152,7 +154,7 @@ dsh plugin --profile web add dsh-workspace-control
 Or from a local checkout:
 
 ```bash
-plugin_manager install_bundle target=D:\Github\dsh-workspace-manager
+plugin_manager install_bundle target=D:\Github\dsh-workspace-control
 ```
 
 Then verify the loader row exists:
@@ -161,8 +163,9 @@ Then verify the loader row exists:
 cordis_inspect_query Config.listConfigs name=dsh-workspace-control
 ```
 
-Replacing an older install: `plugin_manager remove_bundle target=dsh-workspace-remaker`
-drops the previous bundle and its sidebar entry.
+Replacing an older install: this plugin shipped as `dsh-workspace-remaker` and later
+`dsh-workspace-manager`, so drop whichever one is listed:
+`plugin_manager remove_bundle target=dsh-workspace-manager`.
 
 ### The panel reports the same activity the sidebar does
 
@@ -257,9 +260,9 @@ cordis_inspect_query Slots.listSubTree root=main
 cordis_inspect_query Slots.listSubTree root=sidebar.workspaces.session.menu.item
 ```
 
-`sidebar.panellist` and `main` both carry the id `workspace-manager`; the first is
+`sidebar.panellist` and `main` both carry the id `workspace-control`; the first is
 the sidebar button, the second the panel it dispatches. The same panel is also
-reachable from `settings.section` (id `workspace-manager-settings`).
+reachable from `settings.section` (id `workspace-control-settings`).
 
 Finished results retire on their own after a few seconds, so an operation that
 succeeded cannot leave a banner sitting in the panel.
@@ -271,19 +274,19 @@ boot self-heal against a fake registry:
 node .scratch/smoke.mjs
 ```
 
-The same operation is reachable by the agent as the `workspace_manager` tool, so
+The same operation is reachable by the agent as the `workspace_control` tool, so
 the move can be exercised without the UI:
 
 ```
-workspace_manager { "action": "inspect", "sessionId": "session-<uuid>" }
-workspace_manager { "action": "move", "sessionId": "session-<uuid>", "target": "D:\\target" }
+workspace_control { "action": "inspect", "sessionId": "session-<uuid>" }
+workspace_control { "action": "move", "sessionId": "session-<uuid>", "target": "D:\\target" }
 ```
 
 `action=listWorkspaces` reports every workspace with its real session count and
 its blockers (`running` / `open`), which is the same data the panel draws its
 occupancy chips from. `action=inspect` is read-only and reports the recorded
 directory, the owning workspace, whether the session runs, and the storage format. `action=move`
-performs the move. Every step appends a line to `.workspace-manager.log` next to this
+performs the move. Every step appends a line to `.workspace-control.log` next to this
 package, which is the first place to look when a move refuses.
 
 ## The cached title follows the header
@@ -305,6 +308,6 @@ repair step.
 ## Reloading the plugin without restarting the harness
 
 The host half is reloaded by toggling its entry through the plugin manager —
-`plugin_manager` `set_plugin` with `target: "include:workspace-manager"`,
+`plugin_manager` `set_plugin` with `target: "include:workspace-control"`,
 `enabled: false` then `enabled: true` — which re-imports `index.js` in place. The
 client half is refreshed with the page. Neither needs a DSH restart.

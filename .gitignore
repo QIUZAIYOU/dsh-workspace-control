@@ -2,9 +2,9 @@
 .env
 
 # runtime state written by the plugin itself
-.workspace-manager.log
-.workspace-manager.log.1
-.workspace-manager-pending.json
+.workspace-control.log
+.workspace-control.log.1
+.workspace-control-pending.json
 
 # scratch space
 .scratch/

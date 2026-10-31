@@ -7,7 +7,7 @@
  * The dialog talks to the Host half through a plugin-owned Typert Remote
  * namespace: the Host registers descriptors with `ctx.typert.register(...)` and
  * the Client mounts the same descriptors with `ctx.remote.$mount(...)`, then
- * calls `ctx.remote.workspaceManager.move(...)`.
+ * calls `ctx.remote.workspaceControl.move(...)`.
  */
 
 function build(require) {
@@ -15,13 +15,13 @@ function build(require) {
     const h = React.createElement;
 
     const PACKAGE = 'dsh-workspace-control';
-    const NAMESPACE = 'workspaceManager';
+    const NAMESPACE = 'workspaceControl';
     const SLOT = 'sidebar.workspaces.session.menu.item';
     const SETTINGS = 'settings.section';
     const OVERLAY = 'shell.overlay';
     const MAIN = 'main';
     const PANEL = 'sidebar.panellist';
-    const PANEL_KEY = 'workspace-manager';
+    const PANEL_KEY = 'workspace-control';
 
     // One place for the numbers and tones the UI repeats: a result banner lives
     // for a moment, and every accent is the same three channels.
@@ -77,7 +77,7 @@ function build(require) {
         namespace: NAMESPACE,
         method: name,
         invocation: { kind: 'direct' },
-        result: jsonValue('WorkspaceManagerResult'),
+        result: jsonValue('WorkspaceControlResult'),
         parameters: parameters.map((parameter) => ({
           name: parameter.wire,
           wire: parameter.wire,
@@ -290,7 +290,7 @@ function build(require) {
     };
 
     Object.assign(TEXT, {
-      panelTitle: { zh: '工作区管理', en: 'Workspace manager' },
+      panelTitle: { zh: '工作区管理', en: 'Workspaces' },
       workspacesLabel: { zh: '{n} 个工作区', en: '{n} workspaces' },
       panelHint: {
         zh: '重建：把整个工作区换到新目录，里面的会话一起搬过去。合并：把别的工作区的会话并进来。重命名：只改侧栏名称。删除：移除这条工作区记录（目录与文件保留）。',
@@ -302,12 +302,12 @@ function build(require) {
       doRename: { zh: '保存', en: 'Save' },
       renaming: { zh: '正在保存…', en: 'Saving…' },
       needTitle: { zh: '名称不能为空。', en: 'The name cannot be empty.' },
-      settingsTitle: { zh: '工作区管理', en: 'Workspace manager' },
+      settingsTitle: { zh: '工作区管理', en: 'Workspaces' },
       settingsHint: {
         zh: '集中管理工作区：重建到新目录、合并、重命名、删除。占用状态会在操作前就标出来。',
         en: 'Rebuild to a new directory, merge, rename or delete workspaces. Session occupancy is shown before you act.',
       },
-      openPanel: { zh: '打开工作区管理', en: 'Open workspace manager' },
+      openPanel: { zh: '打开工作区管理', en: 'Open workspaces' },
       remove: { zh: '删除', en: 'Delete' },
       removeTitle: { zh: '删除工作区', en: 'Delete workspace' },
       removeHint: {
@@ -508,7 +508,7 @@ function build(require) {
         try {
           await mountPromise;
         } catch (error) {
-          throw new Error(`could not mount the workspace-manager endpoint: ${describeError(error)}`);
+          throw new Error(`could not mount the workspace-control endpoint: ${describeError(error)}`);
         }
       }
       return remote;
@@ -1979,14 +1979,14 @@ function build(require) {
 
         ctx.slots.inject(SLOT, () =>
           ctx.slots.register(
-            { name: SLOT, id: 'workspace-manager-move', order: 500, locale: NS },
+            { name: SLOT, id: 'workspace-control-move', order: 500, locale: NS },
             MenuRow,
           ),
         );
 
         ctx.slots.inject(OVERLAY, () =>
           ctx.slots.register(
-            { name: OVERLAY, id: 'workspace-manager-dialog', order: 40, locale: NS },
+            { name: OVERLAY, id: 'workspace-control-dialog', order: 40, locale: NS },
             Shell,
           ),
         );
@@ -2003,7 +2003,7 @@ function build(require) {
         // discoverable from where users look for configuration.
         ctx.slots.inject(SETTINGS, () =>
           ctx.slots.register(
-            { name: SETTINGS, id: 'workspace-manager-settings', order: 25, locale: NS, label: () => t('panelTitle') },
+            { name: SETTINGS, id: 'workspace-control-settings', order: 25, locale: NS, label: () => t('panelTitle') },
             SettingsEntry,
           ),
         );

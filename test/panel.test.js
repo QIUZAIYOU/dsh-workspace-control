@@ -133,7 +133,7 @@ async function mountPanel(workspaces) {
     },
     locale: { register: () => () => {}, getLocale: () => ({ active: 'zh' }) },
     effect: (callback) => callback(),
-    get: (key) => (key === 'remote.workspaceManager' ? namespace : undefined),
+    get: (key) => (key === 'remote.workspaceControl' ? namespace : undefined),
     inject: () => {},
   };
 

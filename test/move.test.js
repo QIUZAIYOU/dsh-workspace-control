@@ -12,7 +12,7 @@ import { mkdir, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import test, { afterEach, beforeEach } from 'node:test';
 
-import { WorkspaceManager } from '../index.js';
+import { WorkspaceControl } from '../index.js';
 import {
   makeAgent,
   makeContext,
@@ -52,7 +52,7 @@ async function setup({ faults = {}, summaries = [], agents = [] } = {}) {
   const workspace = await registry.create(origin);
   await workspace.attachSession(SESSION);
   const ctx = makeContext({ persistence, registry, summaries, agents });
-  const service = new WorkspaceManager(ctx);
+  const service = new WorkspaceControl(ctx);
   return { persistence, registry, service, origin, target, workspace };
 }
 
@@ -118,7 +118,7 @@ test('a header-only session is refused instead of deleted', async () => {
   const { persistence, registry, service, origin, target } = await setup();
   await persistence.seed(SESSION, origin, []);
   const ctx = makeContext({ persistence, registry });
-  const empty = new WorkspaceManager(ctx);
+  const empty = new WorkspaceControl(ctx);
   const result = await empty.move(SESSION, target);
   assert.equal(result.code, 'empty-log');
   assert.equal(persistence.store.get(SESSION).events.length, 0);
