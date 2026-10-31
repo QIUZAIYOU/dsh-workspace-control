@@ -8,3 +8,8 @@
 
 # scratch space
 .scratch/
+
+# legacy name, before the rename to dsh-workspace-control
+.workspace-manager.log
+.workspace-manager.log.1
+.workspace-manager-pending.json
