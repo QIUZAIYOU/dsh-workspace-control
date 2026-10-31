@@ -154,12 +154,20 @@ tray icon:
 
 - The desktop build runs this host as an Electron child process, so the window
   belongs to the parent and no API crosses that boundary. The button writes a
-  small PowerShell script to the temp directory and answers the Remote first.
-  The script waits two seconds, stops the app, waits for the port to come free,
-  starts the executable again and deletes itself.
+  small `.cmd` helper to the temp directory and answers the Remote first. The
+  helper waits a moment, stops the app, waits for *this* process (the one holding
+  the listening socket) to disappear, starts the executable again and deletes
+  itself. If that process refuses to die, the helper exits instead of starting a
+  second instance.
 - The helper is created through the WMI provider (`Win32_Process.Create`), not as
   a child of this process: a plain child would die together with the app it is
   about to restart. The launcher runs hidden, so no console window appears.
+- The WMI call is issued by `cscript` rather than PowerShell: both are hidden and
+  both leave the helper outside this process tree, but PowerShell needs ~1.2 s of
+  start-up where `cscript` needs ~0.1 s. PowerShell is the fallback when VBScript
+  is unavailable. Measured click-to-relaunch on this machine: **≈1.2 s**, down
+  from ≈8.7 s for the first implementation (a `.ps1` helper started through
+  PowerShell with fixed two- and three-second waits).
 - A plugin loaded into Electron's main process (a browser build) uses the
   documented `app.relaunch()` path instead.
 - Anywhere else the capability reports `restart-unsupported` and the button stays

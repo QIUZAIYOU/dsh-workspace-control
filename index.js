@@ -675,18 +675,39 @@ class WorkspaceControl {
    * name and by pid, waits for the port to be free, then starts the executable
    * again and deletes itself.
    */
+  /**
+   * The helper is `cmd`, not PowerShell: it starts in tens of milliseconds where
+   * `powershell.exe` needs most of a second, and it runs after the app is gone.
+   * `timeout` needs a console the helper does not have, so the waits are `ping`,
+   * and `tasklist` is the poll because it is a native binary.
+   */
   async #desktopRestartScript(exe, parentPid) {
-    const script = join(tmpdir(), `dsh-restart-${process.pid}.ps1`);
-    const image = basename(exe, '.exe');
+    const script = join(tmpdir(), `dsh-restart-${process.pid}.cmd`);
+    const image = basename(exe);
+    const self = process.pid;
     const lines = [
-      "# Written by dsh-workspace-control: restart the desktop app.",
-      "$ErrorActionPreference = 'SilentlyContinue'",
-      'Start-Sleep -Seconds 2',
-      `Get-Process -Name '${image}' | Stop-Process -Force`,
-      `Stop-Process -Id ${parentPid} -Force`,
-      'Start-Sleep -Seconds 3',
-      `Start-Process -FilePath '${exe}'`,
-      'Remove-Item -LiteralPath $PSCommandPath -Force',
+      '@echo off',
+      'rem Written by dsh-workspace-control: restart the desktop app.',
+      'rem Let the Remote answer reach the browser before this process tree dies.',
+      'rem `ping` against TEST-NET is the sleep: `timeout` needs a console here.',
+      'ping -n 1 -w 250 192.0.2.1 >nul',
+      `taskkill /IM "${image}" /F >nul 2>&1`,
+      `taskkill /PID ${parentPid} /T /F >nul 2>&1`,
+      'rem Wait for the process that owns the listening socket, not for stragglers.',
+      'set rounds=0',
+      ':wait',
+      `tasklist /FI "PID eq ${self}" 2>nul | find /I "${self}" >nul || goto ready`,
+      'set /a rounds+=1',
+      'if %rounds% geq 24 goto giveup',
+      'ping -n 2 -w 100 192.0.2.1 >nul',
+      'goto wait',
+      'rem Never start a second instance over one that refused to die.',
+      ':giveup',
+      'del "%~f0" >nul 2>&1',
+      'exit /b 1',
+      ':ready',
+      `start "" "${exe}"`,
+      'del "%~f0" >nul 2>&1',
     ];
     await writeFile(script, `${lines.join('\r\n')}\r\n`, 'utf8');
     return script;
@@ -699,18 +720,86 @@ class WorkspaceControl {
    * so the helper is created through the WMI provider (`Win32_Process.Create`),
    * which owns it instead. The launcher itself runs hidden and exits at once.
    */
+  /**
+   * Ask WMI to start the helper.
+   *
+   * A plain child is cheaper but dies with this process tree, so the helper is
+   * created by WmiPrvSE instead. `cscript` issues that call in ~100 ms where
+   * PowerShell needs ~1.2 s of start-up, and `ShowWindow = 0` keeps the helper
+   * invisible; PowerShell remains the fallback when VBScript is unavailable.
+   */
   async #launchHidden(script) {
-    const inner = [
-      'powershell.exe',
-      '-NoProfile',
-      '-NonInteractive',
-      '-WindowStyle',
-      'Hidden',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-File',
-      `"${script}"`,
-    ].join(' ');
+    const launcher = join(tmpdir(), `dsh-restart-${process.pid}.vbs`);
+    const inner = `cmd.exe /c ""${script}""`;
+    const body = [
+      'Option Explicit',
+      'Dim wmi, service, startup, result, code',
+      'Set wmi = GetObject("winmgmts:\\.\root\cimv2")',
+      'Set service = wmi.Get("Win32_Process")',
+      'Set startup = wmi.Get("Win32_ProcessStartup").SpawnInstance_',
+      'startup.ShowWindow = 0',
+      `code = service.Create("${inner.replace(/"/g, '""')}", Null, startup, result)`,
+      'WScript.Quit code',
+    ].join('\r\n');
+
+    const viaScript = await this.#launchHiddenProcess('cscript.exe', ['//nologo', '//B', launcher], body);
+    if (!viaScript.error) return { via: 'cscript', pid: null };
+    await rm(launcher, { force: true }).catch(() => {});
+
+    const viaPowerShell = await this.#launchViaPowerShell(script);
+    if (!viaPowerShell.error) return { ...viaPowerShell, via: 'powershell' };
+    return { error: `${viaScript.error}; the PowerShell fallback also failed: ${viaPowerShell.error}` };
+  }
+
+  /** Write `body` to `path` and run `argv` until it exits; exit 0 means WMI ran. */
+  #launchHiddenProcess(command, args, body) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      const run = async () => {
+        const target = args[args.length - 1];
+        try {
+          await writeFile(target, body, 'utf8');
+        } catch (error) {
+          return finish({ error: `could not write the launcher: ${describe(error)}` });
+        }
+        let child;
+        try {
+          child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+        } catch (error) {
+          return finish({ error: describe(error) });
+        }
+        let stderr = '';
+        const timer = setTimeout(() => {
+          try {
+            child.kill();
+          } catch {}
+          finish({ error: `${command} timed out` });
+        }, 8000);
+        child.stderr?.on('data', (chunk) => {
+          stderr += chunk;
+        });
+        child.on('error', (error) => {
+          clearTimeout(timer);
+          finish({ error: describe(error) });
+        });
+        child.on('close', (code) => {
+          clearTimeout(timer);
+          if (code === 0) return finish({ ok: true });
+          finish({ error: `${command} exited with ${code}${stderr.trim() ? `: ${stderr.trim()}` : ''}` });
+        });
+      };
+      void run();
+    });
+  }
+
+  /** The WMI call through PowerShell, kept for hosts without usable cscript. */
+  async #launchViaPowerShell(script) {
+    const inner = ['cmd.exe', '/c', `"${script}"`].join(' ');
     // Single quotes are the only thing that needs escaping inside the WMI call.
     const literal = `'${inner.replace(/'/g, "''")}'`;
     const command = [
@@ -847,7 +936,7 @@ class WorkspaceControl {
       debug('restart-spawn-failed', { error: launched.error });
       return failure('restart-failed', `Could not start the restart helper: ${launched.error}`);
     }
-    debug('restart-helper-started', { pid: launched.pid });
+    debug('restart-helper-started', { via: launched.via, pid: launched.pid });
     debug('restart-scheduled', { kind: launcher.kind, script, running: running.length });
     return {
       status: 'restarted',
