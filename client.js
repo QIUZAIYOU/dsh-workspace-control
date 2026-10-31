@@ -214,12 +214,12 @@ function build(require) {
         },
         busy: { zh: '这个会话已有一个移动操作在进行。', en: 'A move for this session is already running.' },
         'session-open': {
-          zh: '这个会话还被应用占用着，DSH 不允许重新发布它的日志。空闲的会话会自动释放，稍等一两秒再试。',
-          en: 'The app still holds this session, so its log cannot be re-published. Idle holders are released automatically — retry in a moment.',
+          zh: '会话还在应用里打开着，日志无法重新发布。DSH 只在退出时释放它：先切到别的会话（或重启 DSH），再从那里移动这个会话。',
+          en: 'The app holds this session open, so its log cannot be re-published. DSH releases it only when the app exits: switch to another session (or restart DSH) and move this one from there.',
         },
         'sessions-open': {
-          zh: '这个工作区里有会话还被应用占用着。空闲的会自动释放，正在跑一轮的要等它结束。',
-          en: 'Some sessions here are still held by the app. Idle ones are released automatically; a session mid-turn has to finish first.',
+          zh: '这个工作区里有会话还被应用持有。DSH 只在退出时释放它们；正在跑一轮的会话同样会被拒绝。',
+          en: 'Some sessions here are still held open by the app. DSH releases them only when it exits; a session mid-turn is refused too.',
         },
         rebuilt: {
           zh: '工作区已重建，会话都跟着搬过去了。刷新页面即可看到。',
@@ -319,12 +319,12 @@ function build(require) {
       runningChip: { zh: '{n} 运行中', en: '{n} running' },
       openChip: { zh: '{n} 已打开 · 空闲', en: '{n} open · idle' },
       openHint: {
-        zh: '这些会话只是被应用打开着，并没有在跑。开始操作时会自动释放它们，不用手动关标签页。',
-        en: 'These sessions are merely open, not mid-turn. Starting the operation releases them automatically — no need to close a tab.',
+        zh: '这些会话只是被应用打开着，并没有在跑。但应用持有它们的写句柄，DSH 只在退出时释放——所以它们现在还不能搬。',
+        en: 'These sessions are merely open, not mid-turn — but the app holds their write handle and DSH releases it only on exit, so they cannot be moved yet.',
       },
       busyHint: {
-        zh: '这些会话正在跑一轮，要等它结束才能搬。已经打开但空闲的会话会被自动释放，不用手动关标签页。',
-        en: 'These sessions are mid-turn; wait for the turn to end. Idle sessions the app has open are released automatically — no need to close tabs.',
+        zh: '这些会话正在跑一轮，要等它结束才能搬；被应用打开着的同样要等它被释放（只在 DSH 退出时）。',
+        en: 'These sessions are mid-turn and have to finish first; open ones stay held until DSH exits.',
       },
       missingDir: { zh: '目录不存在', en: 'missing folder' },
       noOtherWorkspace: { zh: '没有其他工作区可以合并。', en: 'There is no other workspace to merge.' },

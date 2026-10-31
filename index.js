@@ -341,6 +341,21 @@ const failure = (code, message, effectState = 'none') => ({
   effectState,
 });
 
+/**
+ * Cordis hands a plugin a proxied Context: reading a key it did not inject
+ * throws instead of returning undefined. None of the fields below are services
+ * (`scope`, `fiber`, `ctx`, `dispose`), so every read is guarded here and an
+ * unreachable field simply reads as absent.
+ */
+const field = (target, key) => {
+  if (target === null || target === undefined) return undefined;
+  try {
+    return target[key];
+  } catch {
+    return undefined;
+  }
+};
+
 const describe = (error) =>
   error instanceof Error
     ? error.message
@@ -518,56 +533,15 @@ class WorkspaceControl {
     const agent = agents.get(sessionId);
     if (agent === undefined) return { released: true, via: 'absent' };
 
-    const attempts = [];
-    const rootScope = this.#ctx?.scope;
-    const run = (label, call) => {
-      try {
-        const result = call();
-        attempts.push(`${label}:ok`);
-        return result;
-      } catch (error) {
-        attempts.push(`${label}:${describe(error)}`);
-        return undefined;
-      }
-    };
-    const settle = async (label, pending) => {
-      if (pending && typeof pending.then === 'function') {
-        await pending.catch((error) => {
-          attempts.push(`${label}:async:${describe(error)}`);
-        });
-      }
-    };
-
-    const agentCtx = agent.ctx;
-    if (!agentCtx) {
-      attempts.push('ctx:unavailable');
-    } else if (agentCtx.scope !== undefined && agentCtx.scope === rootScope) {
-      attempts.push('ctx.scope:root-refused');
-    } else {
-      const fiber = agentCtx.fiber;
-      if (fiber && typeof fiber.dispose === 'function') {
-        await settle('fiber.dispose', run('fiber.dispose', () => fiber.dispose()));
-      }
-      const scope = agentCtx.scope;
-      const shared = this.#scopeIsShared(scope, agent);
-      if (scope && typeof scope.dispose === 'function' && !shared) {
-        if (agents.get(sessionId) === agent) {
-          await settle('scope.dispose', run('scope.dispose', () => scope.dispose()));
-        }
-      } else if (shared) {
-        attempts.push('ctx.scope:shared-refused');
-      }
-    }
-
-    if (agents.get(sessionId) === agent && typeof agent.dispose === 'function') {
-      await settle('agent.dispose', run('agent.dispose', () => agent.dispose()));
-    }
-
-    // Let the store finish releasing its write handle before anyone re-publishes.
-    await new Promise((resolve) => setTimeout(resolve, RELEASE_SETTLE_MS));
-    const stillLive = agents.get(sessionId) === agent;
-    debug('release', { sessionId, stillLive, attempts });
-    return { released: !stillLive, via: attempts.join(';'), stillLive };
+    // Nothing here disposes the agent. The registry entry is owned by the agent
+    // factory's composite teardown, and the only handle to that teardown is the
+    // `AgentHandle` the factory kept; a third-party plugin sees `{ id }` and, at
+    // most, undocumented internals. Disposing an internals fiber was measured to
+    // leave the registry entry in place, i.e. a zombie agent whose handle is
+    // already gone — strictly worse than refusing. So this method reports the
+    // hold and lets the caller explain it.
+    debug('release-refused', { sessionId, held: true });
+    return { released: false, via: 'held-by-app', stillLive: true };
   }
 
   /** Whether another live agent shares this scope, in which case disposing it
@@ -579,7 +553,7 @@ class WorkspaceControl {
     try {
       for (const other of agents.list()) {
         if (!other || other === agent) continue;
-        if (other.ctx?.scope === scope) return true;
+        if (field(field(other, 'ctx'), 'scope') === scope) return true;
       }
     } catch {
       // Reading another agent's ctx is as unsupported as disposing it; treat an
@@ -610,7 +584,7 @@ class WorkspaceControl {
     }
     return failure(
       'session-open',
-      `The app still holds this session (${released.via}). Close it or restart the harness, then try again.`,
+      'The app still holds this session: a session is released only when the harness exits, so a session you have opened cannot be re-published. Open a different session first (or restart DSH and open another one), then move it.',
     );
   }
 
@@ -625,17 +599,19 @@ class WorkspaceControl {
     } catch (error) {
       keys = describe(error);
     }
-    const agentCtx = agent.ctx;
+    const agentCtx = field(agent, 'ctx');
+    const agentScope = field(agentCtx, 'scope');
+    const rootScope = field(this.#ctx, 'scope');
     return {
       status: 'live',
       sessionId,
       keys,
       hasCtx: agentCtx !== undefined,
-      sameScope: Boolean(agentCtx && agentCtx.scope === this.#ctx?.scope),
-      sharedScope: this.#scopeIsShared(agentCtx?.scope, agent),
-      fiberDispose: typeof agentCtx?.fiber?.dispose,
-      scopeDispose: typeof agentCtx?.scope?.dispose,
-      agentDispose: typeof agent.dispose,
+      sameScope: Boolean(agentCtx && agentScope === rootScope),
+      sharedScope: this.#scopeIsShared(agentScope, agent),
+      fiberDispose: typeof field(field(agentCtx, 'fiber'), 'dispose'),
+      scopeDispose: typeof field(agentScope, 'dispose'),
+      agentDispose: typeof field(agent, 'dispose'),
       internals: this.#internals(),
     };
   }
@@ -1665,7 +1641,7 @@ class WorkspaceControl {
       if (!release.released) {
         return failure(
           'session-open',
-          `The app still holds this session (${release.via}), and a held session cannot be re-published. Close it or restart the harness, then move it.`,
+          `The app still holds this session (${release.via}) and a held session cannot be re-published. Switch to another session or restart DSH, then move this one.`,
         );
       }
       debug('released-before-move', { sessionId, via: release.via });
