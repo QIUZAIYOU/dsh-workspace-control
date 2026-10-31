@@ -1,0 +1,56 @@
+{
+  "name": "dsh-workspace-manager",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Workspace management for DeepSeek Harness: move, rebuild, merge, rename and delete workspaces from a sidebar panel. · DSH 工作区管理：在侧栏面板里迁移、重建、合并、重命名、删除工作区。",
+  "type": "module",
+  "license": "MIT",
+  "author": "QIUZAIYOU",
+  "homepage": "https://github.com/QIUZAIYOU/dsh-workspace-manager#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/QIUZAIYOU/dsh-workspace-manager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/QIUZAIYOU/dsh-workspace-manager/issues"
+  },
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "workspace",
+    "session",
+    "workspace-manager"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-api-gateway",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  }
+}

@@ -1,0 +1,3 @@
+- insert:
+    - id: workspace-manager
+      name: dsh-workspace-manager

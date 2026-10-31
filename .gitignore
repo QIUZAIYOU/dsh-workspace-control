@@ -1,0 +1,10 @@
+# local secrets
+.env
+
+# runtime state written by the plugin itself
+.workspace-manager.log
+.workspace-manager.log.1
+.workspace-manager-pending.json
+
+# scratch space
+.scratch/
