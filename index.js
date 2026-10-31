@@ -1,5 +1,5 @@
 /**
- * Host half of dsh-workspace-manager.
+ * Host half of dsh-workspace-control.
  *
  * Moves one stored session to another working directory (that is: another
  * workspace) without losing its history, and rebinds the workspace registry.
@@ -36,7 +36,7 @@ import { dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-const PACKAGE = 'dsh-workspace-manager';
+const PACKAGE = 'dsh-workspace-control';
 const NAMESPACE = 'workspaceManager';
 
 const PACKAGE_DIR = dirname(fileURLToPath(import.meta.url));

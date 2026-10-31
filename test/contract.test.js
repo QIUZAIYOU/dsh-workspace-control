@@ -106,7 +106,7 @@ test('the Client mounts exactly the descriptors the Host registers', async () =>
   const { mounted } = await loadClient();
   assert.equal(mounted.length, 1, 'one $mount per plugin');
   const contribution = mounted[0];
-  assert.equal(contribution.package, 'dsh-workspace-manager');
+  assert.equal(contribution.package, 'dsh-workspace-control');
   assert.deepEqual(
     plain(contribution.descriptors.map((descriptor) => descriptor.id)),
     plain(DESCRIPTORS.map((descriptor) => descriptor.id)),

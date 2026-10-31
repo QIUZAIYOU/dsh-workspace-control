@@ -1,5 +1,5 @@
 /**
- * Client half of dsh-workspace-manager.
+ * Client half of dsh-workspace-control.
  *
  * Adds one row to the per-session "..." menu in the workspace sidebar and a
  * dialog that moves that session to another working directory.
@@ -14,7 +14,7 @@ function build(require) {
   const React = require('react');
     const h = React.createElement;
 
-    const PACKAGE = 'dsh-workspace-manager';
+    const PACKAGE = 'dsh-workspace-control';
     const NAMESPACE = 'workspaceManager';
     const SLOT = 'sidebar.workspaces.session.menu.item';
     const SETTINGS = 'settings.section';
@@ -360,7 +360,7 @@ function build(require) {
     // Single source of truth for result text: everything lives in `TEXT.code`
     // above. A second `Object.assign(TEXT.code, …)` used to shadow half of it.
 
-    const NS = 'dsh-workspace-manager';
+    const NS = 'dsh-workspace-control';
 
     function flatten(lang) {
       const dictionary = {};
@@ -1719,7 +1719,7 @@ function build(require) {
         try {
           if (layout && typeof layout.selectPanel === 'function') layout.selectPanel(PANEL_KEY);
         } catch (error) {
-          console.error('[dsh-workspace-manager] selectPanel failed', error);
+          console.error('[dsh-workspace-control] selectPanel failed', error);
         }
         if (close) close();
       };
@@ -1962,7 +1962,7 @@ function build(require) {
               try {
                 disposers.push(ctx.locale.register(NS, language, flatten(language)));
               } catch (error) {
-                console.error('[dsh-workspace-manager] locale registration failed', language, error);
+                console.error('[dsh-workspace-control] locale registration failed', language, error);
               }
             }
             return () => {
@@ -1974,7 +1974,7 @@ function build(require) {
                 }
               }
             };
-          }, 'dsh-workspace-manager: dictionaries');
+          }, 'dsh-workspace-control: dictionaries');
         }
 
         ctx.slots.inject(SLOT, () =>
@@ -2020,7 +2020,7 @@ function build(require) {
 }
 
 window.__ModuleLoader__.load({
-  id: 'dsh-workspace-manager',
+  id: 'dsh-workspace-control',
   factory(require) {
     try {
       return build(require);
@@ -2028,7 +2028,7 @@ window.__ModuleLoader__.load({
       // A throw in this factory aborts the whole Web boot ("1 entry did not
       // activate") and leaves the user with an application that will not
       // start, so this half degrades to "absent" instead.
-      console.error('[dsh-workspace-manager] failed to build the client half', error);
+      console.error('[dsh-workspace-control] failed to build the client half', error);
       return { inject: [], apply() {} };
     }
   },

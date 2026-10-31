@@ -142,6 +142,15 @@ supported `Workspace#setTitle` and needs no restart.
 
 ## Install
 
+From npm — the published package is `dsh-workspace-control`; the repository is
+named after the panel it ships:
+
+```bash
+dsh plugin --profile web add dsh-workspace-control
+```
+
+Or from a local checkout:
+
 ```bash
 plugin_manager install_bundle target=D:\Github\dsh-workspace-manager
 ```
@@ -149,7 +158,7 @@ plugin_manager install_bundle target=D:\Github\dsh-workspace-manager
 Then verify the loader row exists:
 
 ```bash
-cordis_inspect_query Config.listConfigs name=dsh-workspace-manager
+cordis_inspect_query Config.listConfigs name=dsh-workspace-control
 ```
 
 Replacing an older install: `plugin_manager remove_bundle target=dsh-workspace-remaker`
@@ -241,7 +250,7 @@ real files into a throwaway `DSH_HOME`.
 
 ```bash
 # 1. the loader row exists and the bundle applied
-cordis_inspect_query Config.listConfigs name=dsh-workspace-manager
+cordis_inspect_query Config.listConfigs name=dsh-workspace-control
 # 2. the Client half registered its three seats (live Slots tree)
 cordis_inspect_query Slots.listSubTree root=sidebar.panellist
 cordis_inspect_query Slots.listSubTree root=main
