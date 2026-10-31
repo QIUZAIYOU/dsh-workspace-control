@@ -32,8 +32,9 @@ import {
   stat as fsStat,
   writeFile,
 } from 'node:fs/promises';
-import { dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
-import { homedir } from 'node:os';
+import { basename, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
+import { spawn } from 'node:child_process';
+import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const PACKAGE = 'dsh-workspace-control';
@@ -60,6 +61,10 @@ const RESUME_DELAY_MS = 2000;
 
 /** How long the host gets to drop a released agent's write handle. */
 const RELEASE_SETTLE_MS = 120;
+
+/** How long a restart waits before it takes the process down, so the Remote can
+ * answer first and the window gets its reply. */
+const RESTART_DELAY_MS = 600;
 
 /** How many blocked sessions a workspace row reports before truncating. */
 const MAX_BLOCKERS = 12;
@@ -216,6 +221,8 @@ export const DESCRIPTORS = Object.freeze([
   ]),
   method('probeAgent', [{ wire: 'sessionId', codec: sessionIdCodec }]),
   method('releaseSession', [{ wire: 'sessionId', codec: sessionIdCodec }]),
+  method('probeRestart', []),
+  method('restart', [{ wire: 'force', codec: booleanCodec }]),
 ]);
 
 /* -------------------------------------------------------------- path helpers */
@@ -625,6 +632,173 @@ class WorkspaceControl {
     }
     this.#busy.add(sessionId);
     return this.#move(sessionId, target).finally(() => this.#busy.delete(sessionId));
+  }
+
+  /* ------------------------------------------------------------- relaunching */
+
+  /**
+   * How this process could restart the app, if at all.
+   *
+   * The desktop build runs this host as an Electron *child* process, so the
+   * window belongs to the parent and there is no API across that boundary: a
+   * plugin loaded into Electron's main process (a browser build) gets the
+   * documented `app.relaunch()` path instead, and everything else is refused
+   * rather than guessed at.
+   */
+  async #relauncher() {
+    if (process.versions.electron !== undefined && process.type === 'browser') {
+      try {
+        const electron = await import('electron');
+        const app = electron?.app ?? electron?.default?.app;
+        if (app && typeof app.relaunch === 'function' && typeof app.exit === 'function') {
+          return { supported: true, kind: 'electron', app };
+        }
+      } catch (error) {
+        debug('relaunch-electron-failed', { error: describe(error) });
+      }
+    }
+
+    if (process.platform === 'win32' && /^deepseek/i.test(basename(process.execPath))) {
+      return { supported: true, kind: 'desktop-script', exe: process.execPath, parent: process.ppid };
+    }
+
+    return {
+      supported: false,
+      reason: process.versions.electron === undefined ? 'not-electron' : 'no-loopback',
+    };
+  }
+
+  /**
+   * The detached script that restarts the desktop app.
+   *
+   * It has to outlive the tree it is about to terminate, so it kills by image
+   * name and by pid, waits for the port to be free, then starts the executable
+   * again and deletes itself.
+   */
+  async #desktopRestartScript(exe, parentPid) {
+    const script = join(tmpdir(), `dsh-restart-${process.pid}.cmd`);
+    const image = basename(exe);
+    const lines = [
+      '@echo off',
+      'rem Written by dsh-workspace-control: restart the desktop app.',
+      'timeout /t 2 /nobreak >nul',
+      `taskkill /IM "${image}" /F >nul 2>&1`,
+      `taskkill /PID ${parentPid} /T /F >nul 2>&1`,
+      'timeout /t 3 /nobreak >nul',
+      `start "" "${exe}"`,
+      'del "%~f0" >nul 2>&1',
+    ];
+    await writeFile(script, `${lines.join('\r\n')}\r\n`, 'utf8');
+    return script;
+  }
+
+  /** Sessions the app reports as mid-turn, which a restart would interrupt. */
+  async #runningSessions() {
+    const summaries = await this.#summaries();
+    if (!summaries) return [];
+    return [...summaries.values()]
+      .filter((row) => row && row.running === true)
+      .map((row) => String(row.sessionId));
+  }
+
+  /** Read-only: whether this process can restart the app, and what it would do. */
+  async probeRestart() {
+    const guard = this.#guard();
+    if (guard) return guard;
+    const launcher = await this.#relauncher();
+    const running = await this.#runningSessions();
+    const plan = {
+      status: 'ok',
+      code: 'ok',
+      effectState: 'none',
+      supported: launcher.supported === true,
+      kind: launcher.kind ?? null,
+      reason: launcher.supported ? null : launcher.reason ?? null,
+      electron: process.versions.electron ?? null,
+      processType: process.type ?? null,
+      execPath: process.execPath,
+      parent: process.ppid,
+      running,
+      internals: this.#internals(),
+    };
+    debug('probe-restart', plan);
+    return plan;
+  }
+
+  /** Restart the app. `force` allows it while a turn is in flight. */
+  async restart(force) {
+    const guard = this.#guard();
+    if (guard) return guard;
+    const launcher = await this.#relauncher();
+    if (launcher.supported !== true) {
+      return failure(
+        'restart-unsupported',
+        launcher.reason === 'not-electron'
+          ? 'This process is a plain Node host, so it cannot restart the app.'
+          : 'This build has no supported way to restart the app from a plugin.',
+      );
+    }
+
+    const running = await this.#runningSessions();
+    if (running.length > 0 && force !== true) {
+      return {
+        ...failure('sessions-running', 'A restart would interrupt a turn in flight.'),
+        running,
+      };
+    }
+
+    if (launcher.kind === 'electron') {
+      const timer = setTimeout(() => {
+        try {
+          launcher.app.relaunch({ args: process.argv.slice(1) });
+        } catch (error) {
+          debug('restart-relaunch-failed', { error: describe(error) });
+        }
+        try {
+          launcher.app.exit(0);
+        } catch {
+          process.exit(0);
+        }
+      }, RESTART_DELAY_MS);
+      if (typeof timer.unref === 'function') timer.unref();
+      debug('restart-scheduled', { kind: launcher.kind, running: running.length });
+      return {
+        status: 'restarted',
+        code: 'restarted',
+        effectState: 'applied',
+        message: 'DSH is restarting; the window reopens on its own.',
+        forced: force === true,
+        interrupted: running,
+      };
+    }
+
+    let script;
+    try {
+      script = await this.#desktopRestartScript(launcher.exe, launcher.parent);
+    } catch (error) {
+      debug('restart-script-failed', { error: describe(error) });
+      return failure('restart-failed', `Could not write the restart helper: ${describe(error)}`);
+    }
+    try {
+      const child = spawn('cmd.exe', ['/c', 'start', '""', '/b', script], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      child.unref();
+    } catch (error) {
+      debug('restart-spawn-failed', { error: describe(error) });
+      return failure('restart-failed', `Could not start the restart helper: ${describe(error)}`);
+    }
+    debug('restart-scheduled', { kind: launcher.kind, script, running: running.length });
+    return {
+      status: 'restarted',
+      code: 'restarted',
+      effectState: 'applied',
+      message: 'DSH is restarting; the window reopens in a few seconds.',
+      forced: force === true,
+      interrupted: running,
+    };
   }
 
   /* -------------------------------------------------- membership bookkeeping */
@@ -1953,7 +2127,7 @@ const plain = (value) => {
 const TOOL = {
   name: 'workspace_control',
   description:
-    'Manage stored sessions and workspaces without losing ids, titles, history or tool records. action=inspect reports one session; action=move relocates one session to `target`; action=listWorkspaces reports every workspace with its stored-session count and how many of those are held by the app or mid-turn; action=rebuild re-homes a whole workspace onto `target` and replaces the record there; action=merge folds the workspaces in `sourceIds` into `workspaceId`; action=retitle renames one workspace; action=remove deletes one workspace record (its sessions are archived first unless keepSessions is true). Held or mid-turn sessions refuse the whole call first, and nothing moves when the pre-flight fails.',
+    'Manage stored sessions and workspaces without losing ids, titles, history or tool records. action=inspect reports one session; action=move relocates one session to `target`; action=listWorkspaces reports every workspace with its stored-session count and how many of those are held by the app or mid-turn; action=rebuild re-homes a whole workspace onto `target` and replaces the record there; action=merge folds the workspaces in `sourceIds` into `workspaceId`; action=retitle renames one workspace; action=remove deletes one workspace record (its sessions are archived first unless keepSessions is true); action=probeRestart reports whether this process can restart DSH; action=restart restarts DSH (pass force to interrupt a turn in flight). Held or mid-turn sessions refuse the whole call first, and nothing moves when the pre-flight fails.',
   parameters: {
     type: 'object',
     properties: {
@@ -1969,9 +2143,11 @@ const TOOL = {
           'remove',
           'probeAgent',
           'release',
+          'probeRestart',
+          'restart',
         ],
         description:
-          'inspect reports one session; move relocates one session; listWorkspaces reports every workspace with its stored-session count and blockers; rebuild re-homes a whole workspace onto `target`; merge folds `sourceIds` into `workspaceId`; retitle sets one workspace title; remove deletes one workspace record.',
+          'inspect reports one session; move relocates one session; listWorkspaces reports every workspace with its stored-session count and blockers; rebuild re-homes a whole workspace onto `target`; merge folds `sourceIds` into `workspaceId`; retitle sets one workspace title; remove deletes one workspace record; probeRestart reports the restart plan; restart restarts DSH.',
       },
       sessionId: { type: 'string', description: 'Exact session id, such as session-<uuid>. Required for inspect and move.' },
       workspaceId: {
@@ -2006,6 +2182,8 @@ const dispatch = async (service, args) => {
   if (action === 'remove') return service.removeWorkspace(args.workspaceId, args.keepSessions);
   if (action === 'probeAgent') return service.probeAgent(args.sessionId);
   if (action === 'release') return service.releaseSession(args.sessionId);
+  if (action === 'probeRestart') return service.probeRestart();
+  if (action === 'restart') return service.restart(args.force);
   return service.inspect(args.sessionId);
 };
 

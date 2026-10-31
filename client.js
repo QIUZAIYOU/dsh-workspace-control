@@ -114,6 +114,8 @@ function build(require) {
       // debugging) needs mounted, so Client and Host stay one list.
       method('probeAgent', [{ wire: 'sessionId', codec: sessionIdCodec }]),
       method('releaseSession', [{ wire: 'sessionId', codec: sessionIdCodec }]),
+      method('probeRestart', []),
+      method('restart', [{ wire: 'force', codec: booleanCodec }]),
     ]);
 
     const REMOTE = Object.freeze({ package: PACKAGE, descriptors: DESCRIPTORS });
@@ -161,6 +163,22 @@ function build(require) {
       merging: { zh: '正在合并…', en: 'Merging…' },
       needSource: { zh: '请先选择要合并的工作区。', en: 'Select at least one workspace to merge.' },
       refreshList: { zh: '刷新列表', en: 'Refresh' },
+      restartButton: { zh: '重启 DSH', en: 'Restart DSH' },
+      restartTitle: { zh: '重启 DSH', en: 'Restart DSH' },
+      restartHint: {
+        zh: '重启会关闭当前窗口并自动重新打开；所有会话都会保留，正在生成的那一轮会中断。被应用打开着的会话只有在重启后才会释放写句柄，所以移动被挡住时用这里。',
+        en: 'The window closes and reopens by itself. Every session is kept; a turn that is still producing is interrupted. A session the app has open releases its write handle only after a restart, so this is the way past a blocked move.',
+      },
+      restartRunning: {
+        zh: '当前有 {n} 个会话正在运行，重启会打断它们。',
+        en: '{n} session(s) are mid-turn; the restart interrupts them.',
+      },
+      restartUnsupported: {
+        zh: '这个构建不能自己重启（例如 dsh web 没有桌面外壳），请手动退出后再启动。',
+        en: 'This build cannot restart itself (a plain dsh web server has no desktop shell); quit and start it again by hand.',
+      },
+      restarting: { zh: '正在重启…', en: 'Restarting…' },
+      doRestart: { zh: '立即重启', en: 'Restart now' },
       back: { zh: '返回', en: 'Back' },
       code: {
         moved: { zh: '会话已移动。', en: 'The session moved.' },
@@ -220,6 +238,11 @@ function build(require) {
         'sessions-open': {
           zh: '这个工作区里有会话还被应用持有。DSH 只在退出时释放它们；正在跑一轮的会话同样会被拒绝。',
           en: 'Some sessions here are still held open by the app. DSH releases them only when it exits; a session mid-turn is refused too.',
+        },
+        restarted: { zh: '已发起重启，窗口会自动重开。', en: 'Restart requested; the window reopens on its own.' },
+        'restart-unsupported': {
+          zh: '这个构建不能自己重启，请手动退出后再启动。',
+          en: 'This build cannot restart itself; quit and start it again by hand.',
         },
         rebuilt: {
           zh: '工作区已重建，会话都跟着搬过去了。刷新页面即可看到。',
@@ -392,6 +415,9 @@ function build(require) {
       picks: [],
       panelView: 'list',
       titleText: '',
+      // What `probeRestart` reported: whether this build can restart itself and
+      // which sessions a restart would interrupt.
+      restartInfo: null,
       // Whether removing a workspace keeps its sessions archived (default) or
       // leaves them in place. The panel exposes it on the confirm view.
       keepSessions: false,
@@ -1160,6 +1186,7 @@ function build(require) {
     const PANEL_CSS = `
       .wsm-root{display:flex;flex-direction:column;gap:14px;padding:18px 20px 26px;color:var(--dsw-alias-label-primary,#ececf1);font-size:13px;line-height:1.55}
       .wsm-root :focus-visible{outline:2px solid var(--dsw-focus-ring-color,rgba(88,101,242,.65));outline-offset:2px}
+      .wsm-headActions{display:flex;align-items:center;gap:8px}
       .wsm-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
       .wsm-headText{min-width:0}
       .wsm-title{margin:0;font-size:16px;font-weight:600;letter-spacing:.01em}
@@ -1400,9 +1427,24 @@ function build(require) {
         ),
         view === 'list'
           ? h(
-              'button',
-              { type: 'button', className: 'wsm-ghost', onClick: () => loadWorkspaces(), disabled: busy },
-              t('refreshList'),
+              'div',
+              { className: 'wsm-headActions' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'wsm-ghost',
+                  onClick: () => patch({ panelView: 'restart', result: null, error: null }),
+                  disabled: busy || (state.restartInfo !== null && state.restartInfo.supported === false),
+                  title: state.restartInfo?.supported === false ? t('restartUnsupported') : undefined,
+                },
+                t('restartButton'),
+              ),
+              h(
+                'button',
+                { type: 'button', className: 'wsm-ghost', onClick: () => loadWorkspaces(), disabled: busy },
+                t('refreshList'),
+              ),
             )
           : h('button', { type: 'button', className: 'wsm-ghost', onClick: toList, disabled: busy }, `← ${t('back')}`),
       );
@@ -1451,6 +1493,43 @@ function build(require) {
             ),
           );
         }
+      } else if (view === 'restart') {
+        const running = Array.isArray(state.restartInfo?.running) ? state.restartInfo.running : [];
+        body = h(
+          'section',
+          { className: 'wsm-detail', key: 'detail' },
+          h(
+            'div',
+            { className: 'wsm-detailHead' },
+            h('span', { className: 'wsm-section' }, t('restartTitle')),
+          ),
+          h('p', { className: 'wsm-note' }, t('restartHint')),
+          running.length > 0
+            ? h(
+                'p',
+                { className: 'wsm-note wsm-note-warn' },
+                t('restartRunning').replace('{n}', String(running.length)),
+              )
+            : null,
+          state.restartInfo && state.restartInfo.supported === false
+            ? h('p', { className: 'wsm-error' }, t('restartUnsupported'))
+            : null,
+          h(
+            'div',
+            { className: 'wsm-actions' },
+            h('button', { type: 'button', className: 'wsm-ghost', onClick: toList, disabled: busy }, t('cancel')),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'wsm-primary',
+                onClick: runRestart,
+                disabled: busy || (state.restartInfo !== null && state.restartInfo.supported === false),
+              },
+              busy ? t('restarting') : t('doRestart'),
+            ),
+          ),
+        );
       } else if (view === 'rebuild') {
         const blocked = current ? current.blocked === true : false;
         body = h(
@@ -1824,6 +1903,28 @@ function build(require) {
         });
       } catch (error) {
         patch({ workspaces: [], phase: 'error', error: describeError(error) });
+      }
+      try {
+        const probe = settle(await callRemote('probeRestart'));
+        if (probe.value) patch({ restartInfo: probe.value });
+      } catch {
+        // A build without the capability is not an error worth showing.
+      }
+    }
+
+    /** Restart the desktop app, so a held session lets go without a tray click. */
+    async function runRestart() {
+      const running = Array.isArray(store.restartInfo?.running) ? store.restartInfo.running : [];
+      patch({ phase: 'moving', result: null, error: null });
+      try {
+        const settled = settle(await callRemote('restart', running.length > 0));
+        if (settled.error) {
+          patch({ phase: 'error', error: settled.error });
+          return;
+        }
+        patch({ phase: 'done', result: settled.refusal || settled.value });
+      } catch (error) {
+        patch({ phase: 'error', error: describeError(error) });
       }
     }
 

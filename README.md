@@ -142,6 +142,28 @@ that shape — the button only appears when the stored title differs from the
 folder name — and it calls `retitleWorkspace(workspaceId, title)`, which uses the
 supported `Workspace#setTitle` and needs no restart.
 
+## Restarting DSH from the panel
+
+A session the app has open is held by the store: its write handle belongs to the
+agent that loaded it, and there is no API to hand it back. That is why a move (or
+a rebuild of the workspace that owns it) refuses until the app lets go, and why
+the only reliable way to release everything is to exit and start DSH again.
+
+The panel therefore has a **Restart DSH** button, so that step does not need the
+tray icon:
+
+- The desktop build runs this host as an Electron child process, so the window
+  belongs to the parent and no API crosses that boundary. The button writes a
+  small `cmd` script to the temp directory, hands it to a detached shell, and
+  answers the Remote first. The script waits two seconds, stops the app, waits
+  for the port to come free, starts the executable again and deletes itself.
+- A plugin loaded into Electron's main process (a browser build) uses the
+  documented `app.relaunch()` path instead.
+- Anywhere else the capability reports `restart-unsupported` and the button stays
+  disabled; nothing is guessed at.
+- A restart interrupts turns that are in flight, so the panel counts them first
+  and asks before it goes ahead.
+
 ## Install
 
 From npm — the package, the repository and the plugin entry all use one name,
