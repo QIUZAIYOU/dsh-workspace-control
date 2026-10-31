@@ -154,9 +154,12 @@ tray icon:
 
 - The desktop build runs this host as an Electron child process, so the window
   belongs to the parent and no API crosses that boundary. The button writes a
-  small `cmd` script to the temp directory, hands it to a detached shell, and
-  answers the Remote first. The script waits two seconds, stops the app, waits
-  for the port to come free, starts the executable again and deletes itself.
+  small PowerShell script to the temp directory and answers the Remote first.
+  The script waits two seconds, stops the app, waits for the port to come free,
+  starts the executable again and deletes itself.
+- The helper is created through the WMI provider (`Win32_Process.Create`), not as
+  a child of this process: a plain child would die together with the app it is
+  about to restart. The launcher runs hidden, so no console window appears.
 - A plugin loaded into Electron's main process (a browser build) uses the
   documented `app.relaunch()` path instead.
 - Anywhere else the capability reports `restart-unsupported` and the button stays

@@ -676,20 +676,83 @@ class WorkspaceControl {
    * again and deletes itself.
    */
   async #desktopRestartScript(exe, parentPid) {
-    const script = join(tmpdir(), `dsh-restart-${process.pid}.cmd`);
-    const image = basename(exe);
+    const script = join(tmpdir(), `dsh-restart-${process.pid}.ps1`);
+    const image = basename(exe, '.exe');
     const lines = [
-      '@echo off',
-      'rem Written by dsh-workspace-control: restart the desktop app.',
-      'timeout /t 2 /nobreak >nul',
-      `taskkill /IM "${image}" /F >nul 2>&1`,
-      `taskkill /PID ${parentPid} /T /F >nul 2>&1`,
-      'timeout /t 3 /nobreak >nul',
-      `start "" "${exe}"`,
-      'del "%~f0" >nul 2>&1',
+      "# Written by dsh-workspace-control: restart the desktop app.",
+      "$ErrorActionPreference = 'SilentlyContinue'",
+      'Start-Sleep -Seconds 2',
+      `Get-Process -Name '${image}' | Stop-Process -Force`,
+      `Stop-Process -Id ${parentPid} -Force`,
+      'Start-Sleep -Seconds 3',
+      `Start-Process -FilePath '${exe}'`,
+      'Remove-Item -LiteralPath $PSCommandPath -Force',
     ];
     await writeFile(script, `${lines.join('\r\n')}\r\n`, 'utf8');
     return script;
+  }
+
+  /**
+   * Start a detached helper without a window and without inheriting this job.
+   *
+   * A plain child would be killed together with the app it is about to restart,
+   * so the helper is created through the WMI provider (`Win32_Process.Create`),
+   * which owns it instead. The launcher itself runs hidden and exits at once.
+   */
+  async #launchHidden(script) {
+    const inner = [
+      'powershell.exe',
+      '-NoProfile',
+      '-NonInteractive',
+      '-WindowStyle',
+      'Hidden',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      `"${script}"`,
+    ].join(' ');
+    // Single quotes are the only thing that needs escaping inside the WMI call.
+    const literal = `'${inner.replace(/'/g, "''")}'`;
+    const command = [
+      '$ErrorActionPreference = "Stop"',
+      `$created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ${literal} }`,
+      'Write-Output ("{0} {1}" -f $created.ReturnValue, $created.ProcessId)',
+    ].join('; ');
+
+    return await new Promise((resolve) => {
+      let stdout = '';
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+      const timer = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {}
+        finish({ error: 'the WMI launcher timed out' });
+      }, 8000);
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk;
+      });
+      child.on('error', (error) => {
+        clearTimeout(timer);
+        finish({ error: describe(error) });
+      });
+      child.on('close', () => {
+        clearTimeout(timer);
+        const parts = stdout.trim().split(/\s+/);
+        const code = Number(parts[0]);
+        if (!Number.isFinite(code)) return finish({ error: `unexpected launcher output: ${stdout.trim() || '(none)'}` });
+        if (code !== 0) return finish({ error: `Win32_Process.Create returned ${code}` });
+        finish({ pid: Number(parts[1]) || null });
+      });
+    });
   }
 
   /** Sessions the app reports as mid-turn, which a restart would interrupt. */
@@ -779,17 +842,12 @@ class WorkspaceControl {
       debug('restart-script-failed', { error: describe(error) });
       return failure('restart-failed', `Could not write the restart helper: ${describe(error)}`);
     }
-    try {
-      const child = spawn('cmd.exe', ['/c', 'start', '""', '/b', script], {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-      child.unref();
-    } catch (error) {
-      debug('restart-spawn-failed', { error: describe(error) });
-      return failure('restart-failed', `Could not start the restart helper: ${describe(error)}`);
+    const launched = await this.#launchHidden(script);
+    if (launched.error) {
+      debug('restart-spawn-failed', { error: launched.error });
+      return failure('restart-failed', `Could not start the restart helper: ${launched.error}`);
     }
+    debug('restart-helper-started', { pid: launched.pid });
     debug('restart-scheduled', { kind: launcher.kind, script, running: running.length });
     return {
       status: 'restarted',
