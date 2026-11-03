@@ -1207,7 +1207,12 @@ function build(require) {
      * Every color comes from a `--dsw-*` alias so light and dark both work.
      */
     const PANEL_CSS = `
-      .wsm-root{display:flex;flex-direction:column;gap:14px;padding:18px 20px 26px;color:var(--dsw-alias-label-primary,#ececf1);font-size:13px;line-height:1.55}
+      .wsm-root{display:flex;flex-direction:column;gap:14px;padding:calc(28px + var(--dsh-frame-top-clearance,0px)) 0 32px;color:var(--dsw-alias-label-primary,#ececf1);font-size:13px;line-height:1.55}
+      /* Market-page rhythm: a fluid 16-48px gutter that turns into a centred
+         960px column on wide frames, so content never touches the edges. */
+      .wsm-page{display:flex;flex-direction:column;gap:14px;min-width:0;
+        padding-left:max(max(16px,min(4vw,48px)),50% - 480px);
+        padding-right:max(max(16px,min(4vw,48px)),50% - 480px)}
       .wsm-root :focus-visible{outline:2px solid var(--dsw-focus-ring-color,rgba(88,101,242,.65));outline-offset:2px}
       .wsm-headActions{display:flex;align-items:center;gap:8px}
       .wsm-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
@@ -1802,7 +1807,12 @@ function build(require) {
           )
         : null;
 
-      return h('div', { className: 'wsm-root' }, head, ...notes, listBody, modal);
+      return h(
+        'div',
+        { className: 'wsm-root' },
+        h('div', { className: 'wsm-page' }, head, ...notes, listBody),
+        modal,
+      );
     }
 
     function PanelIcon(props) {

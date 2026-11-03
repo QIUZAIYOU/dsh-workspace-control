@@ -249,6 +249,27 @@ follows the Harness light/dark switch:
 While the first read is in flight the grid shows three pulsing skeletons, so the
 panel never flashes an empty state. `prefers-reduced-motion` turns the pulse off.
 
+## Design
+
+The panel follows the same page rhythm as the shipped plugin market and
+settings pages: a floored top clearance under the harness frame, a fluid
+16-48px gutter that becomes a centred 960px column on wide windows, hairline
+cards with `--dsw-radius-xl`, and tasks that open as dialogs over the list
+instead of replacing it.
+
+The rules - plus the token list and the ship checklist - live in
+[`docs/design-guidelines.md`](docs/design-guidelines.md). The page frame is:
+
+```css
+.frame {
+  padding: calc(28px + var(--dsh-frame-top-clearance, 0px)) 0 0;
+}
+.frame .page {
+  padding-left:  max(max(16px, min(4vw, 48px)), 50% - 480px);
+  padding-right: max(max(16px, min(4vw, 48px)), 50% - 480px);
+}
+```
+
 ## Tests
 
 ```bash
