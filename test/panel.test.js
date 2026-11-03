@@ -223,3 +223,26 @@ test('the card styles ride on the host theme tokens', async () => {
   assert.match(css, /--dsw-alias-settings-card-stroke/);
   assert.match(css, /--dsw-radius-xl/);
 });
+
+test('a task opens as a dialog over the list instead of replacing it', async () => {
+  const { component, flush } = await mountPanel(ROWS);
+  component(props);
+  await flush();
+
+  const before = component(props);
+  const free = byClass(before, 'wsm-card')[1];
+  const rebuild = byClass(free, 'wsm-action').find((button) => button.props.onClick && !button.props.disabled);
+  assert.ok(rebuild, 'the open-but-idle workspace keeps its actions clickable');
+  rebuild.props.onClick();
+
+  const opened = component(props);
+  assert.equal(byClass(opened, 'wsm-modal').length, 1, 'the task is a dialog');
+  assert.equal(byClass(opened, 'wsm-card').length, 2, 'the list is still there behind it');
+  assert.equal(byClass(opened, 'wsm-detail').length, 1, 'the dialog carries the task form');
+
+  // The scrim cancels: same list, no dialog.
+  byClass(opened, 'wsm-modal')[0].props.onClick();
+  const closed = component(props);
+  assert.equal(byClass(closed, 'wsm-modal').length, 0);
+  assert.equal(byClass(closed, 'wsm-card').length, 2);
+});

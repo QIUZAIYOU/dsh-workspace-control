@@ -1248,6 +1248,10 @@ function build(require) {
       .wsm-skeleton{height:132px;border-radius:var(--dsw-radius-xl,14px);background:var(--dsw-alias-bg-skeleton,rgba(255,255,255,.05));animation:wsm-pulse 1.5s ease-in-out infinite}
       @keyframes wsm-pulse{0%,100%{opacity:.55}50%{opacity:.9}}
       @media (prefers-reduced-motion:reduce){.wsm-skeleton{animation:none}.wsm-card,.wsm-ghost,.wsm-action,.wsm-primary,.wsm-source{transition:none}}
+      .wsm-modal{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.42);backdrop-filter:blur(1.5px)}
+      .wsm-modalCard{width:100%;max-width:560px;max-height:86vh;overflow:auto;display:flex;flex-direction:column;border-radius:calc(var(--dsw-radius-xl,14px) + 2px);background:var(--dsw-alias-bg-l1,#1c1c1f);box-shadow:0 24px 64px rgba(0,0,0,.45)}
+      .wsm-modalCard .wsm-detail{max-width:none;border:none;border-radius:0;background:transparent}
+      .wsm-modal .wsm-detail{max-width:560px}
       .wsm-detail{display:flex;flex-direction:column;gap:13px;padding:16px;max-width:560px;border:.5px solid var(--dsw-alias-settings-card-stroke,rgba(255,255,255,.12));border-radius:var(--dsw-radius-xl,14px);background:var(--dsw-alias-settings-card-fill,rgba(255,255,255,.035))}
       .wsm-detailHead{display:flex;align-items:baseline;gap:8px;min-width:0}
       .wsm-detailName{font-size:14px;font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1479,16 +1483,20 @@ function build(require) {
         notes.push(h('p', { className: 'wsm-note wsm-note-warn', key: 'degraded' }, t('degraded')));
       }
 
-      let body;
-      if (view === 'list') {
+      let detail = null;
+
+      // The list stays mounted behind every task: switching tasks opens a
+      // confirmation dialog over it, so cancelling returns to the same view.
+      const listBody = (() => {
+
         if (list === null) {
-          body = h(
+          return h(
             'div',
             { className: 'wsm-grid', key: 'loading' },
             ...[0, 1, 2].map((index) => h('div', { className: 'wsm-skeleton', key: index, 'aria-hidden': true })),
           );
         } else if (list.length === 0) {
-          body = h(
+          return h(
             'div',
             { className: 'wsm-grid', key: 'empty' },
             h(
@@ -1499,7 +1507,7 @@ function build(require) {
             ),
           );
         } else {
-          body = h(
+          return h(
             'div',
             { className: 'wsm-grid', key: 'rows' },
             ...list.map((entry) =>
@@ -1516,9 +1524,11 @@ function build(require) {
             ),
           );
         }
-      } else if (view === 'restart') {
+      })();
+
+      if (view === 'restart') {
         const running = Array.isArray(state.restartInfo?.running) ? state.restartInfo.running : [];
-        body = h(
+        detail = h(
           'section',
           { className: 'wsm-detail', key: 'detail' },
           h(
@@ -1555,7 +1565,7 @@ function build(require) {
         );
       } else if (view === 'rebuild') {
         const blocked = current ? current.blocked === true : false;
-        body = h(
+        detail = h(
           'section',
           { className: 'wsm-detail', key: 'detail' },
           h(
@@ -1623,7 +1633,7 @@ function build(require) {
         );
       } else if (view === 'merge') {
         const others = (list || []).filter((entry) => entry.id !== state.workspaceId);
-        body = h(
+        detail = h(
           'section',
           { className: 'wsm-detail', key: 'detail' },
           h(
@@ -1692,7 +1702,7 @@ function build(require) {
           ),
         );
       } else if (view === 'rename') {
-        body = h(
+        detail = h(
           'section',
           { className: 'wsm-detail', key: 'detail' },
           h(
@@ -1730,7 +1740,7 @@ function build(require) {
           ),
         );
       } else if (view === 'remove') {
-        body = h(
+        detail = h(
           'section',
           { className: 'wsm-detail', key: 'detail' },
           h(
@@ -1771,7 +1781,28 @@ function build(require) {
         body = null;
       }
 
-      return h('div', { className: 'wsm-root' }, head, ...notes, body);
+      const modal = detail
+        ? h(
+            'div',
+            { className: 'wsm-modal', key: 'modal', onClick: toList },
+            h(
+              'div',
+              {
+                className: 'wsm-modalCard',
+                role: 'dialog',
+                'aria-modal': 'true',
+                'aria-label': t(`${view}Title`),
+                onClick: (event) => event.stopPropagation(),
+                onKeyDown: (event) => {
+                  if (event.key === 'Escape') toList();
+                },
+              },
+              detail,
+            ),
+          )
+        : null;
+
+      return h('div', { className: 'wsm-root' }, head, ...notes, listBody, modal);
     }
 
     function PanelIcon(props) {

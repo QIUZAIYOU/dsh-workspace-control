@@ -1,6 +1,6 @@
 {
   "name": "dsh-workspace-control",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "description": "Workspace management for DeepSeek Harness: move, rebuild, merge, rename and delete workspaces from a sidebar panel. · DSH 工作区管理：在侧栏面板里迁移、重建、合并、重命名、删除工作区。",
   "type": "module",
   "license": "MIT",
