@@ -118,11 +118,14 @@ const readPending = async () => {
   try {
     const raw = await readFile(PENDING_PATH, 'utf8');
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed)
-      ? parsed.filter(
-          (entry) => entry && typeof entry.sessionId === 'string' && typeof entry.target === 'string',
-        )
-      : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry) => {
+      if (!entry || typeof entry !== 'object') return false;
+      if (entry.kind === 'rebuild' || entry.kind === 'merge') {
+        return typeof entry.workspaceId === 'string';
+      }
+      return typeof entry.sessionId === 'string' && typeof entry.target === 'string';
+    });
   } catch {
     return [];
   }
@@ -1369,10 +1372,20 @@ class WorkspaceControl {
       open.push(header.id);
     }
     if (open.length > 0) {
+      // Nothing public releases a held log, and the hold ends with the process.
+      // Queue the whole rebuild so the restart button can finish it.
+      const queued = (await readPending()).filter(
+        (entry) => !(entry.kind === 'rebuild' && entry.workspaceId === workspace.id),
+      );
+      queued.push({ kind: 'rebuild', workspaceId: workspace.id, target: checked.path });
+      await writePending(queued);
+      debug('held-restart-queued', { kind: 'rebuild', workspaceId: workspace.id, target: checked.path });
       return {
         ...failure(
-          'sessions-open',
-          `${open.length} session(s) here are held open by the app (${open.join(', ')}). Close them or restart the harness, then rebuild.`,
+          'held-restart',
+          `${open.length} session(s) here are still held by the app, so their logs cannot be re-published now. The rebuild is queued: restart DSH and it finishes during startup.`,
+          'none',
+          { queued: true, canRestart: true, target: checked.path },
         ),
         sessions: headers.length,
         open,
@@ -1576,10 +1589,20 @@ class WorkspaceControl {
       held.push(id);
     }
     if (held.length > 0) {
+      // Same as a rebuild: nothing public releases a held log, and the hold ends
+      // with the process, so queue the whole merge for the boot pass.
+      const pendingMerge = (await readPending()).filter(
+        (entry) => !(entry.kind === 'merge' && entry.workspaceId === workspaceId),
+      );
+      pendingMerge.push({ kind: 'merge', workspaceId, sourceIds });
+      await writePending(pendingMerge);
+      debug('held-restart-queued', { kind: 'merge', workspaceId, sourceIds });
       return {
         ...failure(
-          'sessions-open',
-          `${held.length} session(s) here are held open by the app (${held.join(', ')}). Close them or restart the harness, then merge.`,
+          'held-restart',
+          `${held.length} session(s) here are still held by the app, so their logs cannot be re-published now. The merge is queued: restart DSH and it finishes during startup.`,
+          'none',
+          { queued: true, canRestart: true },
         ),
         open: held,
       };
@@ -1774,6 +1797,19 @@ class WorkspaceControl {
     debug('pending-recorded', { sessionId, target });
   }
 
+  /** Drop a finished whole-workspace job from the pending queue. */
+  async #dropPendingKind(entry) {
+    const list = await readPending();
+    const next = list.filter(
+      (each) =>
+        !(
+          each.kind === entry.kind &&
+          each.workspaceId === entry.workspaceId
+        ),
+    );
+    if (next.length !== list.length) await writePending(next);
+  }
+
   async #clearPending(sessionId) {
     const list = await readPending();
     if (!list.some((entry) => entry.sessionId === sessionId)) return;
@@ -1791,6 +1827,29 @@ class WorkspaceControl {
     if (list.length === 0) return [];
     const outcomes = [];
     for (const entry of list) {
+      if (entry.kind === 'rebuild' || entry.kind === 'merge') {
+        try {
+          const done =
+            entry.kind === 'rebuild'
+              ? await this.rebuildWorkspace(entry.workspaceId, entry.target)
+              : await this.mergeWorkspaces(entry.workspaceId, entry.sourceIds ?? []);
+          outcomes.push({
+            kind: entry.kind,
+            workspaceId: entry.workspaceId,
+            code: done.code,
+            error: done.status === 'ok' ? null : done.message,
+          });
+          if (done.code !== 'held-restart') await this.#dropPendingKind(entry);
+        } catch (error) {
+          outcomes.push({
+            kind: entry.kind,
+            workspaceId: entry.workspaceId,
+            code: 'exception',
+            error: describe(error),
+          });
+        }
+        continue;
+      }
       if (entry.kind === 'move') {
         // A move queued while the app held the session. Run it for real now: at
         // boot the writer is gone, so `create` can publish the successor.
