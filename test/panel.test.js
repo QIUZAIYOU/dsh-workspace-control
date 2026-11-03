@@ -204,15 +204,20 @@ test('an open but idle workspace says so instead of claiming a run', async () =>
   await flush();
   const [running, idleOpen] = byClass(component(props), 'wsm-card');
 
-  const warn = byClass(running, 'wsm-badge-warn');
+  // State is a word on the card's meta line, not a coloured pill.
+  const warn = byClass(running, 'wsm-state-warn');
   assert.equal(warn.length, 1);
-  // The chip text comes from the module dictionary, so match the rendered copy.
   assert.match(textOf(warn[0]), /^(1 运行中|1 running)$/);
+  assert.equal(byClass(running, 'wsm-badge-warn').length, 0);
 
-  const info = byClass(idleOpen, 'wsm-badge-info');
+  const info = byClass(idleOpen, 'wsm-state-info');
   assert.equal(info.length, 1);
   assert.match(textOf(info[0]), /^(1 已打开 · 空闲|1 open · idle)$/);
-  assert.equal(byClass(idleOpen, 'wsm-note').length, 1);
+  // One meta line carries the count and the state; the card keeps no hint copy.
+  const meta = byClass(idleOpen, 'wsm-meta');
+  assert.equal(meta.length, 1);
+  assert.equal(textOf(meta[0]).includes('·'), true);
+  assert.equal(byClass(idleOpen, 'wsm-note').length, 0);
 });
 
 test('the card styles ride on the host theme tokens', async () => {

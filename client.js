@@ -1233,11 +1233,11 @@ function build(require) {
       .wsm-name{font-size:14px;font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
       .wsm-path{font-family:var(--dsw-font-family-code,ui-monospace,SFMono-Regular,monospace);font-size:12px;line-height:1.45;color:var(--dsw-alias-label-tertiary,rgba(127,127,127,.9));overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
       .wsm-path-wrap{white-space:normal;word-break:break-all}
-      .wsm-badges{display:flex;flex-wrap:wrap;gap:6px}
-      .wsm-badge{display:inline-flex;align-items:center;gap:4px;padding:0 7px;border-radius:var(--dsw-radius-xs,6px);border:.5px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));font-size:11px;line-height:18px;white-space:nowrap;color:var(--dsw-alias-label-secondary,rgba(127,127,127,1))}
-      .wsm-badge-warn{color:var(--dsw-alias-state-warn-label,#e0b060);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#e0a044) 55%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#e0a044) 12%,transparent)}
-      .wsm-badge-info{color:var(--dsw-alias-label-primary-bluish,#9db4f0);border-color:color-mix(in srgb,var(--dsw-alias-state-business-primary,#5865f2) 45%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-business-primary,#5865f2) 10%,transparent)}
-      .wsm-badge-danger{color:var(--dsw-alias-label-error,#e06a6a);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#e06a6a) 50%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#e06a6a) 12%,transparent)}
+      .wsm-meta{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px;font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8a8a);font-variant-numeric:tabular-nums}
+      .wsm-sep{color:var(--dsw-alias-label-tertiary,#8a8a8a);opacity:.7}
+      .wsm-state-warn{color:var(--dsw-alias-state-warn-label,#e0b060)}
+      .wsm-state-info{color:var(--dsw-alias-label-secondary,#9a9a9a)}
+      .wsm-state-danger{color:var(--dsw-alias-label-error,#e06a6a)}
       .wsm-note{margin:0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-tertiary,rgba(127,127,127,.95))}
       .wsm-note-warn{color:var(--dsw-alias-state-warn-label,#e0b060)}
       .wsm-foot{display:flex;flex-wrap:wrap;gap:6px;margin-top:auto;padding-top:8px;border-top:.5px solid var(--dsw-alias-separator-primary,rgba(127,127,127,.12))}
@@ -1360,26 +1360,29 @@ function build(require) {
       const runningNames = names.filter((name) => name.running).map((name) => name.title || name.id);
       const openNames = names.filter((name) => !name.running).map((name) => name.title || name.id);
       const tone = entry.exists === false ? 'missing' : blocked ? 'running' : 'idle';
-      const badges = [h('span', { key: 'sessions', className: 'wsm-badge' }, countText(entry.sessions))];
-      if (entry.exists === false) {
-        badges.push(h('span', { key: 'missing', className: 'wsm-badge wsm-badge-danger' }, handlers.t('missingDir')));
-      }
+      const parts = [h('span', { key: 'sessions' }, countText(entry.sessions))];
       if (entry.running > 0) {
-        badges.push(
+        parts.push(h('span', { key: 'sep1', className: 'wsm-sep', 'aria-hidden': true }, '·'));
+        parts.push(
           h(
             'span',
-            { key: 'running', className: 'wsm-badge wsm-badge-warn', title: runningNames.join(' · ') },
+            { key: 'running', className: 'wsm-state-warn', title: runningNames.join(' · ') },
             handlers.t('runningChip').replace('{n}', String(entry.running)),
           ),
         );
       } else if (entry.open > 0) {
-        badges.push(
+        parts.push(h('span', { key: 'sep2', className: 'wsm-sep', 'aria-hidden': true }, '·'));
+        parts.push(
           h(
             'span',
-            { key: 'open', className: 'wsm-badge wsm-badge-info', title: openNames.join(' · ') },
+            { key: 'open', className: 'wsm-state-info', title: openNames.join(' · ') },
             handlers.t('openChip').replace('{n}', String(entry.open)),
           ),
         );
+      }
+      if (entry.exists === false) {
+        parts.push(h('span', { key: 'sep3', className: 'wsm-sep', 'aria-hidden': true }, '·'));
+        parts.push(h('span', { key: 'missing', className: 'wsm-state-danger' }, handlers.t('missingDir')));
       }
       return h(
         'article',
@@ -1390,13 +1393,8 @@ function build(require) {
           h('span', { className: `wsm-dot wsm-dot-${tone}`, 'aria-hidden': true }),
           h('span', { className: 'wsm-name', title: entry.title }, entry.title),
         ),
+        h('div', { className: 'wsm-meta' }, ...parts),
         h('div', { className: 'wsm-path', title: entry.path }, entry.path),
-        h('div', { className: 'wsm-badges' }, ...badges),
-        blocked
-          ? h('p', { className: 'wsm-note wsm-note-warn' }, handlers.t('busyHint'))
-          : entry.open > 0
-            ? h('p', { className: 'wsm-note' }, handlers.t('openHint'))
-            : null,
         h(
           'div',
           { className: 'wsm-foot' },
@@ -1482,6 +1480,17 @@ function build(require) {
       if (state.result) notes.push(h(ResultCard, { key: 'result', value: state.result }));
       if (internals && (internals.registryIndex === false || internals.agentRelease === false)) {
         notes.push(h('p', { className: 'wsm-note wsm-note-warn', key: 'degraded' }, t('degraded')));
+      }
+      // Occupancy is explained once, under the head, instead of on every card:
+      // the cards only carry the count and the state word.
+      if (view === 'list' && Array.isArray(list)) {
+        const runningTotal = list.reduce((total, entry) => total + (entry.running || 0), 0);
+        const openTotal = list.reduce((total, entry) => total + (entry.open || 0), 0);
+        if (runningTotal > 0) {
+          notes.push(h('p', { className: 'wsm-note', key: 'held' }, t('busyHint')));
+        } else if (openTotal > 0) {
+          notes.push(h('p', { className: 'wsm-note', key: 'held' }, t('openHint')));
+        }
       }
 
       let detail = null;
@@ -1674,11 +1683,11 @@ function build(require) {
                           }),
                       }),
                       h('span', { className: 'wsm-sourceName' }, entry.title),
-                      h('span', { className: 'wsm-badge' }, countText(entry.sessions)),
+                      h('span', { className: 'wsm-state-info' }, countText(entry.sessions)),
                       blocked
                         ? h(
                             'span',
-                            { className: 'wsm-badge wsm-badge-warn' },
+                            { className: 'wsm-state-warn' },
                             t('runningChip').replace('{n}', String(entry.running || 0)),
                           )
                         : null,

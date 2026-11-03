@@ -316,3 +316,28 @@ Adapted from unslop's checklist, with the DSH items appended.
     handling; states are notes, not alerts.
 16. **DSH:** text from the plugin's locale dictionary, `en` and `zh` key sets
     equal.
+
+## 9. Worked example: this panel
+
+The panel in `client.js` is the reference implementation; read it beside these
+rules. Three decisions worth copying:
+
+**The card is three lines, not a pill row.** Dot + name (14px, 500), one meta
+line (count · state, 12px, tertiary, tabular), the path (mono, 11px, ellipsis).
+State is a word coloured by its semantic token — `1 运行中` in warn, `1 已打开 ·
+空闲` in secondary, `目录不存在` in error — never a filled pill. A pill turns
+status into decoration and there is nothing left to read when three of them sit
+in a row.
+
+**Occupancy is explained once, under the head.** The card says how many and in
+what state; the reason and the consequence ("held until DSH exits") appear as a
+single note above the grid when any workspace is affected. Repeating that
+sentence on every card is the same information priced three times.
+
+**Disabled means explained.** A blocked card's actions are disabled *and* the
+note above the grid already said why, so the button never produces a surprise
+refusal after the click. If a fact cannot be shown before acting, it belongs in
+the dialog that precedes the action, not in a toast after it.
+
+**Numbers stay numbers.** The head reads `4 个工作区 · 11 个会话`; there are no
+stat tiles, no sparklines, and no dashboard chrome for a list this small.
