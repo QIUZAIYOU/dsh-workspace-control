@@ -258,7 +258,16 @@ cards with `--dsw-radius-xl`, and tasks that open as dialogs over the list
 instead of replacing it.
 
 The rules - plus the token list and the ship checklist - live in
-[`docs/design-guidelines.md`](docs/design-guidelines.md). The page frame is:
+[`docs/design-guidelines.md`](docs/design-guidelines.md). They adapt the
+**unslop** skill by Damir Sokolovsky
+([@heydamir](https://x.com/heydamir), [heydamir/unslop](https://github.com/heydamir/unslop),
+CC BY 4.0) to DSH's token system and its dark and light themes: his nine passes
+and audit signs, DSH's page frame and theme contract. The panel follows them -
+4px grid, three text roles, one accent, hairline borders, sentence-case labels,
+no looping motion, every colour from a `--dsw-*` token with a theme-neutral
+fallback.
+
+The page frame is:
 
 ```css
 .frame {
