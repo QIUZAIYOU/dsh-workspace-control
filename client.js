@@ -2212,8 +2212,7 @@ window.__ModuleLoader__.load({
         const text = String((error && error.stack) || error).slice(0, 600);
         const banner = document.createElement('div');
         banner.setAttribute('data-workspace-control-error', '');
-        banner.textContent = 'workspace control failed to load
-' + text;
+                banner.textContent = ['workspace control failed to load', text].join(String.fromCharCode(10));
         banner.style.cssText =
           'position:fixed;left:12px;bottom:12px;z-index:2147483647;max-width:44ch;' +
           'padding:10px 12px;border-radius:10px;font:12px/1.45 ui-monospace,monospace;' +
