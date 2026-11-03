@@ -164,6 +164,7 @@ function build(require) {
       needSource: { zh: '请先选择要合并的工作区。', en: 'Select at least one workspace to merge.' },
       refreshList: { zh: '刷新列表', en: 'Refresh' },
       restartButton: { zh: '重启 DSH', en: 'Restart DSH' },
+      restartAndMove: { zh: '重启并完成移动', en: 'Restart and finish moving' },
       restartTitle: { zh: '重启 DSH', en: 'Restart DSH' },
       restartHint: {
         zh: '重启会关闭当前窗口并自动重新打开；所有会话都会保留，正在生成的那一轮会中断。被应用打开着的会话只有在重启后才会释放写句柄，所以移动被挡住时用这里。',
@@ -232,8 +233,12 @@ function build(require) {
         },
         busy: { zh: '这个会话已有一个移动操作在进行。', en: 'A move for this session is already running.' },
         'session-open': {
-          zh: '会话还在应用里打开着，日志无法重新发布。DSH 只在退出时释放它：先切到别的会话（或重启 DSH），再从那里移动这个会话。',
-          en: 'The app holds this session open, so its log cannot be re-published. DSH releases it only when the app exits: switch to another session (or restart DSH) and move this one from there.',
+          zh: '会话还被应用持有，日志无法重新发布。DSH 只在退出时释放它。',
+          en: 'The app still holds this session, so its log cannot be re-published. DSH releases it only when the app exits.',
+        },
+        'held-restart': {
+          zh: '会话还被应用持有，现在无法重新发布日志。移动已排队：点下面的按钮重启 DSH，启动时会自动完成。',
+          en: 'The app still holds this session, so its log cannot be re-published yet. The move is queued: restart DSH below and it finishes during startup.',
         },
         'sessions-open': {
           zh: '这个工作区里有会话还被应用持有。DSH 只在退出时释放它们；正在跑一轮的会话同样会被拒绝。',
@@ -921,6 +926,18 @@ function build(require) {
 
       const close = () => patch({ open: false, phase: 'idle', result: null, error: null });
 
+      // The store owns a held session's id, so the move can only finish after the
+      // process that holds it is gone. The panel restarts the app; this does the
+      // same from the dialog, because that is where the refusal is explained.
+      const restartAndFinish = async () => {
+        patch({ phase: 'moving' });
+        try {
+          await callRemote('restart', true);
+        } catch (error) {
+          patch({ phase: 'error', error: describeError(error) });
+        }
+      };
+
       const lines = [];
 
       lines.push(
@@ -1004,17 +1021,23 @@ function build(require) {
             'div',
             { key: 'actions-result', style: { display: 'flex', justifyContent: 'flex-end', gap: 8 } },
             h('button', { type: 'button', onClick: close, style: buttonStyle(false, false) }, t('close')),
-            ok
+            value.canRestart
               ? h(
                   'button',
-                  {
-                    type: 'button',
-                    onClick: () => window.location.reload(),
-                    style: buttonStyle(true, false),
-                  },
-                  t('reload'),
+                  { type: 'button', onClick: restartAndFinish, style: buttonStyle(true, false) },
+                  t('restartAndMove'),
                 )
-              : null,
+              : ok
+                ? h(
+                    'button',
+                    {
+                      type: 'button',
+                      onClick: () => window.location.reload(),
+                      style: buttonStyle(true, false),
+                    },
+                    t('reload'),
+                  )
+                : null,
           ),
         );
       } else {

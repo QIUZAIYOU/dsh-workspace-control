@@ -8,7 +8,7 @@
 
 import './env.js';
 import assert from 'node:assert/strict';
-import { mkdir, readdir } from 'node:fs/promises';
+import { mkdir, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import test, { afterEach, beforeEach } from 'node:test';
 
@@ -34,6 +34,7 @@ let harness;
 
 beforeEach(async () => {
   harness = await makeHarnessHome();
+  await rm(process.env.WSC_PENDING_PATH, { force: true });
 });
 
 afterEach(async () => {
@@ -93,14 +94,36 @@ test('a clean move republishes the events under the target directory', async () 
   assert.equal((await artifacts()).length, 1, 'exactly one artifact on disk');
 });
 
-test('a held session is released before the move when it is idle', async () => {
-  const { service, target } = await setup({
+test('a held session is queued for the next boot instead of refused', async () => {
+  const { persistence, service, origin, target } = await setup({
     summaries: [summary(SESSION, { agentAvailable: true })],
     agents: [makeAgent(SESSION)],
   });
   const result = await service.move(SESSION, target);
-  assert.equal(result.code, 'session-open', 'an undroppable holder is reported, not ignored');
+
+  assert.equal(result.code, 'held-restart');
+  assert.equal(result.status, 'error');
+  assert.equal(result.queued, true, 'the intent survives the refusal');
+  assert.equal(result.canRestart, true, 'the caller may finish it by restarting');
   assert.equal(result.effectState, 'none');
+  assert.equal(persistence.store.get(SESSION).header.cwd, origin, 'nothing was touched');
+});
+
+test('a queued move finishes at boot once the holder is gone', async () => {
+  const holder = await setup({
+    summaries: [summary(SESSION, { agentAvailable: true })],
+    agents: [makeAgent(SESSION)],
+  });
+  const queued = await holder.service.move(SESSION, holder.target);
+  assert.equal(queued.code, 'held-restart');
+
+  // Next process: same layout, no holder. The boot pass replays the move.
+  const boot = await setup();
+  const outcomes = await boot.service.resumePending();
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].kind, 'move');
+  assert.equal(outcomes[0].code, 'moved');
+  assert.equal(boot.persistence.store.get(SESSION).header.cwd, boot.target);
 });
 
 test('a turn in flight is refused without touching the file', async () => {

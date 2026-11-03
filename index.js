@@ -44,7 +44,8 @@ const PACKAGE_DIR = dirname(fileURLToPath(import.meta.url));
 // `WSC_LOG_PATH` lets a test run keep its noise out of the installed plugin's
 // log while the default stays next to the sources.
 const LOG_PATH = process.env.WSC_LOG_PATH || join(PACKAGE_DIR, '.workspace-control.log');
-const PENDING_PATH = join(PACKAGE_DIR, '.workspace-control-pending.json');
+const PENDING_PATH =
+  process.env.WSC_PENDING_PATH || join(PACKAGE_DIR, '.workspace-control-pending.json');
 
 /** Diagnostics are append-only, so the file is capped and rolled over instead of
  * growing for the lifetime of the installation. */
@@ -57,7 +58,9 @@ const PARK_MARK = '.workspace-control-parked-';
 
 /** Delay before the membership self-heal runs: the registry has rebuilt its
  * canonical-cwd index by then, which is what refused the attach last run. */
-const RESUME_DELAY_MS = 2000;
+const RESUME_DELAY_MS = 600;
+const RESUME_RETRY_MS = 1500;
+const RESUME_RETRIES = 12;
 
 /** How long the host gets to drop a released agent's write handle. */
 const RELEASE_SETTLE_MS = 120;
@@ -341,11 +344,12 @@ function titleFollowsPath(title, path) {
  * Every refusal carries `status: 'error'` plus a stable `code`, so a caller can
  * tell success from failure without knowing the code table.
  */
-const failure = (code, message, effectState = 'none') => ({
+const failure = (code, message, effectState = 'none', extra) => ({
   status: 'error',
   code,
   message,
   effectState,
+  ...(extra && typeof extra === 'object' ? extra : {}),
 });
 
 /**
@@ -1787,11 +1791,37 @@ class WorkspaceControl {
     if (list.length === 0) return [];
     const outcomes = [];
     for (const entry of list) {
+      if (entry.kind === 'move') {
+        // A move queued while the app held the session. Run it for real now: at
+        // boot the writer is gone, so `create` can publish the successor.
+        try {
+          const moved = await this.#move(entry.sessionId, entry.target);
+          outcomes.push({
+            sessionId: entry.sessionId,
+            target: entry.target,
+            kind: 'move',
+            code: moved.code,
+            attached: moved.attached === true,
+            error: moved.status === 'ok' ? null : moved.message,
+          });
+        } catch (error) {
+          outcomes.push({
+            sessionId: entry.sessionId,
+            target: entry.target,
+            kind: 'move',
+            code: 'exception',
+            attached: false,
+            error: describe(error),
+          });
+        }
+        continue;
+      }
       try {
         const settled = await this.#settleRegistry(entry.sessionId, entry.target);
         outcomes.push({
           sessionId: entry.sessionId,
           target: entry.target,
+          kind: 'attach',
           attached: settled.attached,
           error: settled.error,
         });
@@ -1799,6 +1829,7 @@ class WorkspaceControl {
         outcomes.push({
           sessionId: entry.sessionId,
           target: entry.target,
+          kind: 'attach',
           attached: false,
           error: describe(error),
         });
@@ -1956,16 +1987,20 @@ class WorkspaceControl {
     }
 
     if (this.#openOf(summaries, sessionId)) {
-      // Held, but idle: ask the host to drop the agent so the log is released and
-      // the id can be re-published. Verified by re-reading the registry after.
-      const release = await this.#releaseHeld(sessionId);
-      if (!release.released) {
-        return failure(
-          'session-open',
-          `The app still holds this session (${release.via}) and a held session cannot be re-published. Switch to another session or restart DSH, then move this one.`,
-        );
-      }
-      debug('released-before-move', { sessionId, via: release.via });
+      // The store owns this id while the app holds the session, so `create` has
+      // no way to publish a successor for it, and nothing in the public surface
+      // releases that hold. The hold does not outlive the process — so queue the
+      // move and let the boot pass finish it once the writer is gone.
+      const queuedList = (await readPending()).filter((entry) => entry.sessionId !== sessionId);
+      queuedList.push({ sessionId, target: destination, kind: 'move' });
+      await writePending(queuedList);
+      debug('held-restart-queued', { sessionId, target: destination });
+      return failure(
+        'held-restart',
+        'The app still holds this session, so its log cannot be re-published while it runs. The move is queued: restart DSH (the panel has a button) and it finishes during startup.',
+        'none',
+        { queued: true, canRestart: true, target: destination },
+      );
     }
 
     let events;
@@ -2402,4 +2437,27 @@ function applyEntry(ctx) {
   }, RESUME_DELAY_MS);
   if (timer && typeof timer.unref === 'function') timer.unref();
   ctx.effect(() => () => clearTimeout(timer), `${PACKAGE}: pending repair timer`);
+  // A queued move may lose its first race with the web Client reconnecting, and
+  // the hold then comes back. Keep retrying for a short window instead of
+  // leaving the work to the next restart.
+  let retries = 0;
+  const retry = setInterval(async () => {
+    retries += 1;
+    if (retries > RESUME_RETRIES) {
+      clearInterval(retry);
+      return;
+    }
+    try {
+      const left = await readPending();
+      if (left.length === 0) {
+        clearInterval(retry);
+        return;
+      }
+      await service.resumePending();
+    } catch (error) {
+      debug('pending-resume-failed', describe(error));
+    }
+  }, RESUME_RETRY_MS);
+  if (retry && typeof retry.unref === 'function') retry.unref();
+  ctx.effect(() => () => clearInterval(retry), `${PACKAGE}: pending repair retries`);
 }

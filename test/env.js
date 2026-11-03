@@ -7,3 +7,4 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 process.env.WSC_LOG_PATH = join(tmpdir(), `wsc-test-${process.pid}.log`);
+process.env.WSC_PENDING_PATH = join(tmpdir(), `wsc-test-${process.pid}-pending.json`);

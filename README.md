@@ -142,6 +142,18 @@ that shape — the button only appears when the stored title differs from the
 folder name — and it calls `retitleWorkspace(workspaceId, title)`, which uses the
 supported `Workspace#setTitle` and needs no restart.
 
+## Moving a session the app still holds
+
+The store refuses to publish a successor for a session whose log the app still
+owns, and nothing in the public surface releases that ownership — it ends when
+the process does.
+
+So the plugin does not dead-end there: it records the move in
+`.workspace-control-pending.json` and reports `held-restart`. The dialog offers
+one button that restarts DSH; on the way up the boot pass replays the queued
+move before anything can take the session again, and the retry window covers the
+case where the web Client reconnects first.
+
 ## Restarting DSH from the panel
 
 A session the app has open is held by the store: its write handle belongs to the
