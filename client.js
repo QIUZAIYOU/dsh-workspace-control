@@ -23,6 +23,11 @@ function build(require) {
     const PANEL = 'sidebar.panellist';
     const PANEL_KEY = 'workspace-control';
 
+  // Page-wide, not per-apply: the loader can run `apply` twice on one page
+  // (boot, then an HMR rebuild), and the seats the first run filled must stay
+  // claimed until the plugin that filled them is disposed.
+  const seated = new Set();
+
     // One place for the numbers and tones the UI repeats: a result banner lives
     // for a moment, and every accent is the same three channels.
     const DISMISS_MS = 6000;
@@ -2156,44 +2161,59 @@ function build(require) {
           }, 'dsh-workspace-control: dictionaries');
         }
 
-        ctx.slots.inject(SLOT, () =>
-          ctx.slots.register(
-            { name: SLOT, id: 'workspace-control-move', order: 500, locale: NS },
-            MenuRow,
-          ),
-        );
+        // A page can mount this bundle more than once: the loader re-applies
+        // every contribution after an HMR rebuild, and a second `apply` on one
+        // page meets the seats the first one already filled. Cordis refuses a
+        // duplicate key/id loudly — an uncaught error that aborts the rest of
+        // `apply` and leaves the plugin half-wired — so every seat is claimed
+        // once and handed back with this plugin's own effect.
+        const seat = (slot, options, component) => {
+          const key = `${slot}:${options.key ?? options.id}`;
 
-        ctx.slots.inject(OVERLAY, () =>
-          ctx.slots.register(
-            { name: OVERLAY, id: 'workspace-control-dialog', order: 40, locale: NS },
-            Shell,
-          ),
-        );
+          ctx.slots.inject(slot, () => {
+            if (seated.has(key)) {
+              console.warn(`[${PACKAGE}] ${key} is already on this page; skipping the duplicate`);
+              return undefined;
+            }
+
+            seated.add(key);
+
+            let dispose;
+            try {
+              dispose = ctx.slots.register({ name: slot, ...options }, component);
+            } catch (error) {
+              seated.delete(key);
+              console.error(`[${PACKAGE}] could not fill ${key}`, error);
+              return undefined;
+            }
+
+            return () => {
+              seated.delete(key);
+              try {
+                dispose?.();
+              } catch {
+                /* the whole plugin is going away anyway */
+              }
+            };
+          });
+        };
+
+        seat(SLOT, { id: 'workspace-control-move', order: 500, locale: NS }, MenuRow);
+
+        seat(OVERLAY, { id: 'workspace-control-dialog', order: 40, locale: NS }, Shell);
 
         // The workspace row's own "..." menu has no extension slot (the whole
         // browser region is a single `shadows-shipped-ui` hole), so workspace
         // management gets its own central panel: a sidebar entry plus the panel
         // the entry dispatches, both keyed by the same id.
-        ctx.slots.inject(MAIN, () =>
-          ctx.slots.register({ name: MAIN, key: PANEL_KEY, locale: NS }, WorkspacePanel),
-        );
+        seat(MAIN, { key: PANEL_KEY, locale: NS }, WorkspacePanel);
 
         // Settings is the third door to the same panel, so the feature is
         // discoverable from where users look for configuration.
-        ctx.slots.inject(SETTINGS, () =>
-          ctx.slots.register(
-            { name: SETTINGS, id: 'workspace-control-settings', order: 25, locale: NS, label: () => t('panelTitle') },
-            SettingsEntry,
-          ),
-        );
+        seat(SETTINGS, { id: 'workspace-control-settings', order: 25, locale: NS, label: () => t('panelTitle') }, SettingsEntry);
 
         // The sidebar owns this button and addresses the main panel by list id.
-        ctx.slots.inject(PANEL, () =>
-          ctx.slots.register(
-            { name: PANEL, id: PANEL_KEY, order: 20, locale: NS, label: () => t('panelTitle') },
-            PanelIcon,
-          ),
-        );
+        seat(PANEL, { id: PANEL_KEY, order: 20, locale: NS, label: () => t('panelTitle') }, PanelIcon);
       },
     };
 }
