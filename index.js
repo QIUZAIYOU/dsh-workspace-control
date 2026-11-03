@@ -20,6 +20,8 @@
  * holds two artifacts for one id and never holds none.
  */
 
+import { helperScript, launcherScript } from './restart.js';
+
 import {
   access,
   appendFile,
@@ -94,16 +96,22 @@ let logWrites = 0;
 
 /** Append-only breadcrumb next to this package. Diagnostics are a courtesy and
  * never throw into the caller; the move is the job. */
+const DEBUG_ENABLED = process.env.WSC_LOG !== '0';
+
 const debug = (event, data) => {
+  if (!DEBUG_ENABLED) return;
   const line = `${new Date().toISOString()} ${event} ${safeJson(data)}\n`;
   appendFile(LOG_PATH, line, 'utf8').catch(() => {});
   logWrites += 1;
   if (logWrites % LOG_CHECK_EVERY === 0) {
     // Roll over past the limit; a lost breadcrumb is better than an unbounded file.
     fsStat(LOG_PATH)
-      .then((info) => {
+      .then(async (info) => {
         if (info.size <= LOG_LIMIT_BYTES) return undefined;
-        return rename(LOG_PATH, `${LOG_PATH}.1`).catch(() => rm(LOG_PATH, { force: true }));
+        // Windows refuses a rename onto an existing name, and the previous
+        // roll-over file is always there from the second roll onwards.
+        await rm(`${LOG_PATH}.1`, { force: true }).catch(() => {});
+        await rename(LOG_PATH, `${LOG_PATH}.1`).catch(() => rm(LOG_PATH, { force: true }));
       })
       .catch(() => {});
   }
@@ -137,7 +145,11 @@ const writePending = async (entries) => {
       await rm(PENDING_PATH, { force: true });
       return;
     }
-    await writeFile(PENDING_PATH, `${JSON.stringify(entries, null, 2)}\n`, 'utf8');
+    // Write-then-rename: a half-written queue is unreadable JSON at the next
+    // start, and every membership repair in it is lost with it.
+    const temp = `${PENDING_PATH}.${process.pid}.tmp`;
+    await writeFile(temp, `${JSON.stringify(entries, null, 2)}\n`, 'utf8');
+    await rename(temp, PENDING_PATH);
   } catch (error) {
     debug('pending-write-failed', error instanceof Error ? error.message : String(error));
   }
@@ -250,6 +262,9 @@ const samePath = (left, right) => pathKey(left) === pathKey(right);
 
 /** The backend escapes a session id to one safe path segment. Ids are already
  * safe, but keep the mapping in case an id ever carries an unusual character. */
+/** Six random base36 characters, enough to keep two helpers apart. */
+const randomTag = () => Math.random().toString(36).slice(2, 8).padEnd(6, '0');
+
 const encodeId = (id) =>
   id.replace(/[^A-Za-z0-9._-]/g, (character) =>
     `~${character.codePointAt(0).toString(16).padStart(4, '0')}`,
@@ -690,34 +705,16 @@ class WorkspaceControl {
    * and `tasklist` is the poll because it is a native binary.
    */
   async #desktopRestartScript(exe, parentPid) {
-    const script = join(tmpdir(), `dsh-restart-${process.pid}.cmd`);
+    // Not a predictable name in a shared temp directory: another local process
+    // could otherwise plant the file we are about to execute.
+    const script = join(tmpdir(), `dsh-restart-${process.pid}-${randomTag()}.cmd`);
     const image = basename(exe);
     const self = process.pid;
-    const lines = [
-      '@echo off',
-      'rem Written by dsh-workspace-control: restart the desktop app.',
-      'rem Let the Remote answer reach the browser before this process tree dies.',
-      'rem `ping` against TEST-NET is the sleep: `timeout` needs a console here.',
-      'ping -n 1 -w 250 192.0.2.1 >nul',
-      `taskkill /IM "${image}" /F >nul 2>&1`,
-      `taskkill /PID ${parentPid} /T /F >nul 2>&1`,
-      'rem Wait for the process that owns the listening socket, not for stragglers.',
-      'set rounds=0',
-      ':wait',
-      `tasklist /FI "PID eq ${self}" 2>nul | find /I "${self}" >nul || goto ready`,
-      'set /a rounds+=1',
-      'if %rounds% geq 24 goto giveup',
-      'ping -n 2 -w 100 192.0.2.1 >nul',
-      'goto wait',
-      'rem Never start a second instance over one that refused to die.',
-      ':giveup',
-      'del "%~f0" >nul 2>&1',
-      'exit /b 1',
-      ':ready',
-      `start "" "${exe}"`,
-      'del "%~f0" >nul 2>&1',
-    ];
-    await writeFile(script, `${lines.join('\r\n')}\r\n`, 'utf8');
+    await writeFile(
+      script,
+      helperScript({ image, parentPid, selfPid: self, exe }),
+      'utf8',
+    );
     return script;
   }
 
@@ -737,18 +734,9 @@ class WorkspaceControl {
    * invisible; PowerShell remains the fallback when VBScript is unavailable.
    */
   async #launchHidden(script) {
-    const launcher = join(tmpdir(), `dsh-restart-${process.pid}.vbs`);
+    const launcher = join(tmpdir(), `dsh-restart-${process.pid}-${randomTag()}.vbs`);
     const inner = `cmd.exe /c ""${script}""`;
-    const body = [
-      'Option Explicit',
-      'Dim wmi, service, startup, result, code',
-      'Set wmi = GetObject("winmgmts:\\.\root\cimv2")',
-      'Set service = wmi.Get("Win32_Process")',
-      'Set startup = wmi.Get("Win32_ProcessStartup").SpawnInstance_',
-      'startup.ShowWindow = 0',
-      `code = service.Create("${inner.replace(/"/g, '""')}", Null, startup, result)`,
-      'WScript.Quit code',
-    ].join('\r\n');
+    const body = launcherScript({ inner });
 
     const viaScript = await this.#launchHiddenProcess('cscript.exe', ['//nologo', '//B', launcher], body);
     if (!viaScript.error) return { via: 'cscript', pid: null };
@@ -771,7 +759,8 @@ class WorkspaceControl {
       const run = async () => {
         const target = args[args.length - 1];
         try {
-          await writeFile(target, body, 'utf8');
+          // `wx` fails instead of following a file someone else planted.
+          await writeFile(target, body, { encoding: 'utf8', flag: 'wx' });
         } catch (error) {
           return finish({ error: `could not write the launcher: ${describe(error)}` });
         }
@@ -1873,6 +1862,68 @@ class WorkspaceControl {
    * that the registry builds at startup, so a session whose header was rewritten
    * during the previous run is refused then and accepted now. Nothing else is
    * touched: the artifacts already live in the target directory. */
+  /**
+   * Recover what an interrupted move left parked: a `.workspace-control-parked-`
+   * copy is an orphan once its successor exists, and the only copy of the
+   * session when it does not. Both cases are decided by the store, not guessed.
+   */
+  async sweepParked() {
+    const recovered = [];
+
+    for (const root of await sessionRoots()) {
+      let buckets;
+      try {
+        buckets = await readdir(root, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+
+      for (const bucket of buckets) {
+        if (!bucket.isDirectory()) continue;
+        const bucketPath = join(root, bucket.name);
+
+        let entries;
+        try {
+          entries = await readdir(bucketPath, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue;
+          const marker = entry.name.indexOf(PARK_MARK);
+          if (marker <= 0) continue;
+
+          const sessionId = entry.name.slice(0, marker);
+          const parked = join(bucketPath, entry.name);
+          const original = join(bucketPath, sessionId);
+
+          let successor = false;
+          try {
+            successor = (await this.#ctx.sessionPersistence.stat(sessionId)) !== undefined;
+          } catch {
+            successor = false;
+          }
+
+          try {
+            if (successor) {
+              await rm(parked, { recursive: true, force: true });
+              recovered.push({ sessionId, action: 'discarded' });
+            } else if (!(await this.#dirExists(original))) {
+              await rename(parked, original);
+              recovered.push({ sessionId, action: 'restored' });
+            }
+          } catch (error) {
+            recovered.push({ sessionId, action: 'failed', error: describe(error) });
+          }
+        }
+      }
+    }
+
+    if (recovered.length > 0) debug('parked-swept', recovered);
+    return recovered;
+  }
+
   async resumePending() {
     const list = await readPending();
     if (list.length === 0) return [];
@@ -2410,7 +2461,11 @@ export function apply(ctx) {
 /** JSON round-trip so tool output survives the host's lossless check. */
 const plain = (value) => {
   try {
-    return JSON.parse(JSON.stringify(value));
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch (error) {
+      return { status: 'error', code: 'unserializable', message: describe(error) };
+    }
   } catch {
     return { status: 'error', code: 'unserializable', message: 'The result could not be serialized.' };
   }
@@ -2538,6 +2593,18 @@ function applyEntry(ctx) {
   } catch (error) {
     debug('tool-register-failed', describe(error));
   }
+
+  // Nothing stays parked by an interrupted move: either its successor was
+  // published (the parked copy is dead weight) or it was not (the parked copy is
+  // the session). Runs before the membership repair for the same reason.
+  service
+    .sweepParked()
+    .then((recovered) => {
+      if (recovered.length > 0) debug('parked-swept-on-start', recovered);
+    })
+    .catch((error) => {
+      debug('parked-sweep-failed', describe(error));
+    });
 
   // Self-heal: settle the memberships a previous run could not. By the time this
   // fires the registry has rebuilt its canonical-cwd index, which is exactly the

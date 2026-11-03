@@ -61,6 +61,11 @@ Failure handling: if step 4 fails, the parked directory is renamed back and the
 result says the move was rolled back. A rebuild rolls every session it already
 moved back to the old directory, and removes the record it created at the target.
 
+An interrupted move leaves one thing behind: a parked directory next to the
+session. On the next start `sweepParked()` decides what it is by asking the
+store -- a successor exists, so the parked copy is dead weight; no successor,
+so the parked copy *is* the session and is renamed back.
+
 Two different states are refused up front, and the difference matters:
 
 - `running` — a turn is in flight. A live agent keeps the old directory as its
@@ -297,6 +302,18 @@ real files into a throwaway `DSH_HOME`.
 - `contract.test.js` — loads `client.js` in a `vm` and asserts the Client mounts
   exactly the descriptors the Host registers (ids, namespaces, parameter wires)
   and that both locale dictionaries carry the same keys.
+- `restart.test.js` -- the helper text: the image kill, the process-tree kill,
+  the socket poll, and the give-up branch that never starts a second instance.
+- `scripts/sync-contract.mjs` runs first and fails the suite when the Client
+  mirror of the descriptor list drifts from `index.js`, which is canonical.
+  `npm run sync:contract` regenerates the mirror.
+
+## Diagnostics and two knobs
+
+`WSC_LOG=0` in the host environment makes the plugin silent; by default it
+writes `.workspace-control.log` next to the package, rolls it over at 512 KiB,
+and replaces the pending queue atomically, so a crash cannot leave half a
+queue behind.
 
 ## Notes and limits
 
