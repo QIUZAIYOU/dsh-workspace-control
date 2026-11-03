@@ -228,6 +228,7 @@ export const DESCRIPTORS = Object.freeze([
   method('probeAgent', [{ wire: 'sessionId', codec: sessionIdCodec }]),
   method('releaseSession', [{ wire: 'sessionId', codec: sessionIdCodec }]),
   method('probeRestart', []),
+  method('clientModule', []),
   method('restart', [{ wire: 'force', codec: booleanCodec }]),
 ]);
 
@@ -858,6 +859,56 @@ class WorkspaceControl {
     return [...summaries.values()]
       .filter((row) => row && row.running === true)
       .map((row) => String(row.sessionId));
+  }
+
+  /**
+   * Read-only: what the Web boot graph says about this plugin's Client half.
+   *
+   * `clientModules` composes the entry table the browser receives, so this
+   * answers "is the Client bundle part of the boot at all" without a browser
+   * console: a missing entry explains an enabled-but-dead plugin exactly.
+   */
+  async clientModule() {
+    const guard = this.#guard();
+    if (guard) return guard;
+    const modules = field(this.#ctx.get?.('clientModules'), 'graph') !== undefined
+      ? this.#ctx.get('clientModules')
+      : null;
+    const base = {
+      status: 'ok',
+      code: 'ok',
+      effectState: 'none',
+      service: modules !== null,
+      package: PACKAGE,
+    };
+    if (modules === null) return { ...base, entries: null, reason: 'clientModules is unavailable' };
+    try {
+      const graph = typeof modules.graph === 'function' ? modules.graph() : null;
+      const entries = Array.isArray(graph?.entries) ? graph.entries : [];
+      const mine = entries.find((entry) => entry && entry.id === PACKAGE) ?? null;
+      let clientPath = null;
+      try {
+        clientPath = typeof modules.clientPath === 'function' ? modules.clientPath(PACKAGE) ?? null : null;
+      } catch (error) {
+        clientPath = `error: ${describe(error)}`;
+      }
+      let baseline = null;
+      try {
+        baseline = typeof modules.artifactBaseline === 'function' ? modules.artifactBaseline(PACKAGE) ?? null : null;
+      } catch (error) {
+        baseline = `error: ${describe(error)}`;
+      }
+      return {
+        ...base,
+        rev: typeof graph?.rev === 'string' ? graph.rev : null,
+        entries: entries.map((entry) => String(entry && entry.id)),
+        mine: mine ? JSON.parse(JSON.stringify(mine)) : null,
+        clientPath,
+        baseline,
+      };
+    } catch (error) {
+      return { ...base, status: 'error', code: 'unreadable', entries: null, reason: describe(error) };
+    }
   }
 
   /** Read-only: whether this process can restart the app, and what it would do. */
@@ -2386,9 +2437,10 @@ const TOOL = {
           'release',
           'probeRestart',
           'restart',
+          'clientModule',
         ],
         description:
-          'inspect reports one session; move relocates one session; listWorkspaces reports every workspace with its stored-session count and blockers; rebuild re-homes a whole workspace onto `target`; merge folds `sourceIds` into `workspaceId`; retitle sets one workspace title; remove deletes one workspace record; probeRestart reports the restart plan; restart restarts DSH.',
+          'inspect reports one session; move relocates one session; listWorkspaces reports every workspace with its stored-session count and blockers; rebuild re-homes a whole workspace onto `target`; merge folds `sourceIds` into `workspaceId`; retitle sets one workspace title; remove deletes one workspace record; probeRestart reports the restart plan; restart restarts DSH; clientModule reports whether the Client bundle is part of the Web boot graph.',
       },
       sessionId: { type: 'string', description: 'Exact session id, such as session-<uuid>. Required for inspect and move.' },
       workspaceId: {
@@ -2424,6 +2476,7 @@ const dispatch = async (service, args) => {
   if (action === 'probeAgent') return service.probeAgent(args.sessionId);
   if (action === 'release') return service.releaseSession(args.sessionId);
   if (action === 'probeRestart') return service.probeRestart();
+  if (action === 'clientModule') return service.clientModule();
   if (action === 'restart') return service.restart(args.force);
   return service.inspect(args.sessionId);
 };

@@ -115,6 +115,7 @@ function build(require) {
       method('probeAgent', [{ wire: 'sessionId', codec: sessionIdCodec }]),
       method('releaseSession', [{ wire: 'sessionId', codec: sessionIdCodec }]),
       method('probeRestart', []),
+      method('clientModule', []),
       method('restart', [{ wire: 'force', codec: booleanCodec }]),
     ]);
 
