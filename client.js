@@ -365,7 +365,7 @@ function build(require) {
      */
     function activeLang() {
       try {
-        const service = ctxRef && ctxRef.locale;
+        const service = optionalService(ctxRef, 'locale');
         const snapshot =
           service && typeof service.getLocale === 'function' ? service.getLocale() : null;
         const id = snapshot && typeof snapshot.active === 'string' ? snapshot.active : '';
@@ -466,7 +466,7 @@ function build(require) {
     let mountPromise = null;
 
     const remoteRoot = () => {
-      const remote = ctxRef && ctxRef.remote;
+      const remote = optionalService(ctxRef, 'remote');
       return remote && typeof remote === 'object' ? remote : null;
     };
 
@@ -2086,10 +2086,12 @@ function build(require) {
     /* ------------------------------------------------------------------ entry */
 
     return {
-      // `remote` is the Cordis service key of the Client Remote (the gateway's
-      // browser face). Without it in `inject`, reading `ctx.remote` throws
-      // "cannot get property \"remote\" without inject".
-      inject: ['slots', 'locale', 'remote'],
+      // Only `slots` is required. Every other service this half uses is read
+      // through `ctx.get`: a service listed here that the Client context does
+      // not bind leaves the whole fiber pending, and a pending fiber renders
+      // nothing at all — the failure mode users see as "enabled but dead".
+      // `remote` in particular only exists once the gateway has a connection.
+      inject: ['slots'],
       // Pure functions the tests drive directly: the status chain is the part
       // that must agree with the sidebar, and rendering it would need a DOM.
       testables: { liveRunReader, reconcileEntry },
@@ -2116,21 +2118,27 @@ function build(require) {
         });
 
         // Mount eagerly when the gateway is already there; otherwise the first
-        // menu interaction mounts it.
-        armScopedInject(ctx);
-        ensureNamespace().catch(() => {
-          /* the row stays visible; opening it reports the failure */
-        });
+        // interaction mounts it. Wrapped because a Client context that binds
+        // `remote` differently must not cost us the registrations below.
+        try {
+          armScopedInject(ctx);
+          ensureNamespace().catch(() => {
+            /* the UI stays visible; opening it reports the failure */
+          });
+        } catch (error) {
+          console.error('[dsh-workspace-control] remote wiring failed', error);
+        }
 
         // Dictionaries go in through the per-locale form: the namespace is not
         // part of the compile-time merge table, and one locale failing here must
         // never take the whole Client half down.
-        if (ctx.locale && typeof ctx.locale.register === 'function') {
+        const locale = optionalService(ctx, 'locale');
+        if (locale && typeof locale.register === 'function') {
           ctx.effect(() => {
             const disposers = [];
             for (const language of ['en', 'zh']) {
               try {
-                disposers.push(ctx.locale.register(NS, language, flatten(language)));
+                disposers.push(locale.register(NS, language, flatten(language)));
               } catch (error) {
                 console.error('[dsh-workspace-control] locale registration failed', language, error);
               }
@@ -2197,8 +2205,24 @@ window.__ModuleLoader__.load({
     } catch (error) {
       // A throw in this factory aborts the whole Web boot ("1 entry did not
       // activate") and leaves the user with an application that will not
-      // start, so this half degrades to "absent" instead.
+      // start, so this half degrades to a visible banner instead of silence:
+      // "plugin enabled but nothing works" is unactionable for a user.
       console.error('[dsh-workspace-control] failed to build the client half', error);
+      try {
+        const text = String((error && error.stack) || error).slice(0, 600);
+        const banner = document.createElement('div');
+        banner.setAttribute('data-workspace-control-error', '');
+        banner.textContent = 'workspace control failed to load
+' + text;
+        banner.style.cssText =
+          'position:fixed;left:12px;bottom:12px;z-index:2147483647;max-width:44ch;' +
+          'padding:10px 12px;border-radius:10px;font:12px/1.45 ui-monospace,monospace;' +
+          'white-space:pre-wrap;color:#ffb4b4;background:rgba(40,16,20,.94);' +
+          'border:1px solid rgba(255,120,120,.45)';
+        (document.body || document.documentElement).appendChild(banner);
+      } catch {
+        /* nothing left to report to */
+      }
       return { inject: [], apply() {} };
     }
   },

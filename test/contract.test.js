@@ -18,7 +18,7 @@ import { DESCRIPTORS } from '../index.js';
 const PACKAGE_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Evaluate the browser bundle and hand back everything `apply` registered. */
-export async function loadClient() {
+export async function loadClient({ hideOptional = false } = {}) {
   const source = await readFile(join(PACKAGE_DIR, 'client.js'), 'utf8');
   const registrations = [];
   const dictionaries = [];
@@ -67,6 +67,9 @@ export async function loadClient() {
   vm.runInContext(source, sandbox, { filename: 'client.js' });
   assert.ok(entry, 'the bundle must call __ModuleLoader__.load');
 
+  // `slots` is the only required service; the others are read through `ctx.get`
+  // so a Client context without them still registers the whole UI.
+  const optional = {};
   const ctx = {
     remote: {
       async $mount(contribution) {
@@ -89,7 +92,7 @@ export async function loadClient() {
       getLocale: () => ({ active: 'zh' }),
     },
     effect: (callback) => callback(),
-    get: () => undefined,
+    get: (key) => (hideOptional ? undefined : (optional[key] ?? ctx[key])),
     inject: () => {},
   };
 
@@ -135,7 +138,7 @@ test('each descriptor agrees on namespace, service and parameter wires', async (
 
 test('the bundle declares the services its code reads', async () => {
   const { modes } = await loadClient();
-  assert.deepEqual(plain(modes.inject), ['slots', 'locale', 'remote']);
+  assert.deepEqual(plain(modes.inject), ['slots']);
 });
 
 test('every localization key exists in both languages', async () => {
@@ -150,4 +153,21 @@ test('every localization key exists in both languages', async () => {
     assert.ok(String(zh.dictionary[key]).trim() !== '', `${key} has zh text`);
     assert.ok(String(en.dictionary[key]).trim() !== '', `${key} has en text`);
   }
+});
+
+test('a Client context without the optional services still registers the UI', async () => {
+  // The regression this exists for: `remote` (and `locale`) listed as required
+  // left the whole fiber pending, so the plugin stayed enabled but rendered
+  // nothing at all — no menu row, no panel, no settings page.
+  const { registrations } = await loadClient({ hideOptional: true });
+  const ids = registrations.map((entry) => entry.options.id ?? entry.options.key);
+  assert.deepEqual(plain(ids).sort(), [
+    // `workspace-control` twice on purpose: the main panl's keyed cell and the
+    // sidebar button's list id address the same panel.
+    'workspace-control',
+    'workspace-control',
+    'workspace-control-dialog',
+    'workspace-control-move',
+    'workspace-control-settings',
+  ].sort());
 });
