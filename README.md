@@ -1,405 +1,153 @@
 # dsh-workspace-control
 
-A DeepSeek Harness plugin for workspace-level maintenance: rename, delete, rebuild onto another directory, merge, and move single sessions between workspaces.
+DeepSeek Harness 工作区管理插件：重建、合并、重命名、删除工作区，迁移单个会话，并在面板里重启或热刷新 DSH。
 
-One panel for DeepSeek Harness workspaces: rename, delete, rebuild onto another
-directory, merge, and move single sessions between them — without losing
-anything. A session's working directory is baked into its stored header and into
-the session-store directory name, so the UI cannot change it after creation; this
-plugin does that through the supported persistence seam.
+会话的工作目录在创建时就写进了会话头和存储目录名，界面无法修改。本插件通过官方的 `sessionPersistence` 接口生成新的会话头，不直接改字节，存储的只追加约束和格式校验保持有效。
 
-## What it does
+## 功能
 
-The panel lives in its own central view, opened from its icon in the sidebar's
-panel row (工作区管理 / Workspaces):
+| 功能 | 入口 | 说明 |
+| --- | --- | --- |
+| 重建工作区 | 面板「重建…」 | 整个工作区换到新目录，会话随之移动；旧记录清空后删除，标题跟随新目录名（手动改过的标题保留）。 |
+| 合并工作区 | 面板「合并…」 | 把其他工作区的会话并入当前目录；源记录清空后删除。 |
+| 重命名 | 面板「重命名」 | 只改侧栏标题，不动目录。 |
+| 删除 | 面板「删除」 | 删除工作区记录；会话先归档，目录与文件留在磁盘，可再用同一路径加回。 |
+| 移动会话 | 会话行「…」菜单 →「移动到工作区…」 | 把单个会话移到目标目录；目标不是工作区时自动创建。 |
+| 重启 DSH | 面板「重启 DSH」 | 退出并重新启动 DSH，用于释放被应用占用的会话。 |
+| 刷新界面 | 面板头部、重启面板、会话头部圆形按钮 | 热更新 Host 插件代码并重新发布界面，不重启 DSH。 |
 
-| Action | What happens |
+## 工作区与会话
+
+面板入口在侧栏面板行的「工作区管理」图标，设置页也有同一面板。
+
+每一行在点击前就给出：目录路径、真实会话数、占用情况与原因。运行中的工作区禁用重建、合并、删除；被应用打开但空闲的会话会先被释放，释放失败才拒绝。
+
+两个拒绝原因：
+
+- `running`：回合正在执行。移动会让 agent 留在旧目录，必须先停止。
+- `session-open` / `open`：会话日志仍被应用持有，存储拒绝发布后继。插件先尝试释放，做不到才拒绝。
+
+移动保持会话 id、标题、全部已提交事件和格式版本，不直接编辑文件。若发布失败，已停放的原目录会回滚；中断的移动在下次启动时自动判定并恢复。重复执行同一移动即为修复动作，只会补齐工作区归属。
+
+移动成功但工作区归属没有被接受时，结果为 `moved-unattached`，插件会写入 pending 队列，并在下次启动 2 秒后自动补上归属。
+
+主要结果码：
+
+| 结果 | 含义 |
 | --- | --- |
-| **重建… / Rebuild…** | Pick a new directory for a whole workspace. Every session it holds moves with it, the record at the new path inherits the title and the sidebar position, and the old record is removed once it is empty. |
-| **合并… / Merge…** | Pick other workspaces. Their sessions move into this one's directory, and a source record is dropped once nothing is left in it. |
-| **重命名 / Rename** | Change only the sidebar title. The directory is untouched. |
-| **删除 / Delete** | Remove the workspace record. Its sessions are archived first, and the directory with all session files stays on disk — the workspace can be added back at the same path later. |
+| `moved` | 文件与工作区归属都已完成。 |
+| `moved-unattached` | 文件已移动，归属待下次启动自动补齐。 |
+| `attached` | 文件已在目标目录，本次只补了归属。 |
+| `held-restart` | 会话被应用持有，需要重启 DSH 后再重试。 |
+| `workspace-unattached` | 归属修复也失败，重启 DSH 后重试一次。 |
+| `migration-required` | 会话是旧格式，先打开一次完成升级。 |
 
-Every row also reports, *before anything is clicked*:
+## 重启 DSH
 
-- how many sessions the directory really holds;
-- **占用 N / N held** — how many of those cannot move right now, because a turn is
-  running (`running`) or because the app still holds the session log (`open`, which
-  makes the store refuse to publish a successor artifact). Rebuild, merge and
-  delete stay disabled on such a row, and the held sessions are named in the row,
-  so a refusal is visible up front instead of arriving after the fact.
+面板的「重启 DSH」会先统计进行中的回合并确认，然后退出当前进程并重新启动。
 
-Single sessions still have their own entry: **移动到工作区… / Move to workspace…** in
-the session row's `...` menu moves just that session to a directory. If the target
-is already a workspace, the session joins it; if not, the workspace is created.
+- 桌面端通过 WMI 创建隐藏的 helper 进程（`Win32_ProcessStartup.ShowWindow = 0`），不产生终端窗口，点击到重新启动约 1.2 秒。
+- 其他环境若没有可用的重启能力，返回 `restart-unsupported`，按钮禁用，不做猜测。
 
-The move keeps the session id, title, every committed event (history, tool calls,
-approvals) and the format version, then regroups the session under the workspace
-that owns the target directory. If that workspace does not exist yet, it is
-created.
+## 刷新界面
 
-## How the move works
+三个入口做同一件事：
 
-The session store is append-only and refuses rewritten history, so the move
-materializes a **successor artifact** through the supported persistence seam
-instead of editing bytes:
+1. 面板头部的「刷新界面」；
+2. 重启面板里的同名按钮；
+3. 会话头部工具行的圆形刷新按钮。
 
-1. `sessionPersistence.stat(id)` — read the header (id, version, cwd, lineage).
-2. `sessionPersistence.open(id, 'read')` — copy every committed event. A read
-   handle never takes write ownership, so this works while the UI holds the
-   session open.
-3. Park the old session directory (atomic rename, same volume), so the id leaves
-   the store before the successor claims it.
-4. `sessionPersistence.create({ ...header, cwd }, { inheritedEventCount })` +
-   `append(events)` + `flush()` — the backend writes a correct header frame with
-   the new `cwd` in the current format.
-5. Read back `stat(id)` and verify the stored `cwd`; then update the workspace
-   registry: `resolveByPath(target) ?? create(target)`, `attachSession(id)`, and
-   `detachSession(id)` on the old workspace.
+刷新分两半：Host 端通过官方 HMR 服务 `reconcileProfile` 重载改动的插件代码；随后重新发布所有本地 Client bundle，页面用 `modules.entries.sync` 原地热替换。进行中的回合不受影响，页面不重载，滚动位置和状态保留。
 
-Failure handling: if step 4 fails, the parked directory is renamed back and the
-result says the move was rolled back. A rebuild rolls every session it already
-moved back to the old directory, and removes the record it created at the target.
+桌面端从不 reload 文档：桌面壳在窗口创建时冻结 boot manifest，reload 可能请求到跨代次的 bundle，一个入口失败就会中止整轮启动。热同步只重挂字节变化的 fiber，没有这个窗口。
 
-An interrupted move leaves one thing behind: a parked directory next to the
-session. On the next start `sweepParked()` decides what it is by asking the
-store -- a successor exists, so the parked copy is dead weight; no successor,
-so the parked copy *is* the session and is renamed back.
+刷新不显示 DSH 的启动 loading 页，因为根本没有文档重载。插件改为自己画一层半透明遮罩加 spinner，快速刷新时 120ms 后才淡入，`prefers-reduced-motion` 下禁用。
 
-Two different states are refused up front, and the difference matters:
+`retain.js` 会保留 boot 时的 bundle 代次，即使之后按 F5 或使用菜单里的「重新加载页面」，旧 URL 仍能取到字节，不会再因 404 导致启动失败。
 
-- `running` — a turn is in flight. A live agent keeps the old directory as its
-  process cwd and permission root, so moving under it would be wrong. The signal
-  is the turn boundary in the session log (`turn/start` with no `turn/end` after
-  it), **not** `agents.get(id)`: an idle session that the app merely has open also
-  has a live agent, which is why the sidebar can say 「空闲」 while a naive check
-  says "running".
-- `session-open` — the session is open in the app, so its log is in memory and the
-  store owns that id. `create` then refuses the successor ("already exists"), so
-  the move cannot work until the tab is closed; refusing here names the real
-  reason instead of failing halfway through a rebuild.
+清空场景下的结果：
 
-Two more guards keep a half-done move from eating history:
+- `refreshed-hot`：有插件被重载并完成热替换。
+- `refreshed-unchanged`：没有改动，界面已是最新。
+- `refreshed-needs-restart`：页面与 Host 不是同一代次，需要重启 DSH。
+- `refreshed-partial` / `plugins-pending` / `plugins-restart`：部分插件没有回来。
+- `no-hmr` / `reload-failed`：当前构建没有 HMR 服务，或 reconcile 抛错。
 
-- A header-only session (no committed events) is refused, because `create` writes
-  nothing and only the first `append` publishes — moving it would delete the
-  original and produce no successor.
-- If the store still reports the id right after the directory was parked (an
-  index-based resolution), the parked copy is restored and the move reports
-  `store-cached` instead of failing with a misleading write error.
+普通 `dsh web` 页面没有冻结的 manifest，仍走文档 reload。
 
-After a move the registry is settled in the same process. `WorkspaceRegistry`
-builds its canonical-cwd header index once, in `[Service.init]`, and
-`attachSession` validates against that index (`readSessionHeader` prefers a live
-Session, then the cached header, and only re-reads the store when neither
-exists). The plugin therefore drops the moved session's stale index entry before
-attaching — the fields are plain `Map`s on the service instance — so the next
-validation re-reads the rewritten header from the store. That is the state a
-restart would produce, without a restart. The Client then asks
-`sessions.refreshProjections(id)` to rebuild the derived view, and any other
-workspace that still lists the session is detached.
-
-If the attach is still refused (for example while the session is open in a tab,
-where a live Session still answers with the old header), the move is recorded as
-pending and settles automatically on the next start.
-
-
-### Workspace membership is verified, and repairable
-
-`attachSession` is judged by the canonical-cwd index, which the harness builds at
-startup. A session whose header was rewritten *during this run* may therefore be
-rejected until the harness restarts. The Host never reports that as a plain
-success:
-
-- `moved` — header rewritten, read-back matched, workspace reported the session.
-- `moved-unattached` — the file moved but the workspace did not accept it yet.
-- `attached` — the session already lived in the target directory (an earlier
-  move left the membership behind); this run only completed the membership.
-
-Repeating the same move is the repair action: when the stored cwd already equals
-the target, the plugin skips the file work and only settles the workspace
-membership, so a partial move is finished by the same command that made it.
-`workspace-unattached` means even that failed; restart DSH and repeat once the
-index is fresh.
-
-The unattached case also heals itself on startup: the Host records the pending
-`(sessionId, target)` pair in `.remaker-pending.json`, and two seconds into the
-next boot — after the registry has rebuilt its index — it settles the membership
-and clears the entry. So a move that landed its file but not its membership needs
-one restart, not a second click.
-
-Both halves also refuse to break application start: a throwing Client factory
-degrades to an absent plugin instead of failing the Web boot gate (which fails
-the whole app with `1 entry did not activate`), and a throwing Host `apply` is
-logged to `.workspace-control.log` instead of failing the entry.
-
-### The workspace title follows its directory, unless you renamed it
-
-`create(path)` derives a title from the last path segment, so a title that still
-equals its own basename was never typed by the user: a rebuild carries that kind
-of title over to the new directory name (`ce` rebuilt onto
-`D:\Github\workspace test` becomes `workspace test`). A title that differs from
-its basename is treated as a deliberate rename and is preserved untouched.
-
-Records created by an earlier build ignored that rule and kept the pre-rebuild
-title. The workspace row in the manager offers a one-click repair for exactly
-that shape — the button only appears when the stored title differs from the
-folder name — and it calls `retitleWorkspace(workspaceId, title)`, which uses the
-supported `Workspace#setTitle` and needs no restart.
-
-## Moving a session the app still holds
-
-The store refuses to publish a successor for a session whose log the app still
-owns, and nothing in the public surface releases that ownership — it ends when
-the process does.
-
-So the plugin does not dead-end there: it records the move in
-`.workspace-control-pending.json` and reports `held-restart`. The dialog offers
-one button that restarts DSH; on the way up the boot pass replays the queued
-move before anything can take the session again, and the retry window covers the
-case where the web Client reconnects first.
-
-## Restarting DSH from the panel
-
-A session the app has open is held by the store: its write handle belongs to the
-agent that loaded it, and there is no API to hand it back. That is why a move (or
-a rebuild of the workspace that owns it) refuses until the app lets go, and why
-the only reliable way to release everything is to exit and start DSH again.
-
-The panel therefore has a **Restart DSH** button, so that step does not need the
-tray icon:
-
-- The desktop build runs this host as an Electron child process, so the window
-  belongs to the parent and no API crosses that boundary. The button writes a
-  small `.cmd` helper to the temp directory and answers the Remote first. The
-  helper waits a moment, stops the app, waits for *this* process (the one holding
-  the listening socket) to disappear, starts the executable again and deletes
-  itself. If that process refuses to die, the helper exits instead of starting a
-  second instance.
-- The helper is created through the WMI provider (`Win32_Process.Create`), not as
-  a child of this process: a plain child would die together with the app it is
-  about to restart. The launcher runs hidden, so no console window appears.
-- The WMI call is issued by `cscript` rather than PowerShell: both are hidden and
-  both leave the helper outside this process tree, but PowerShell needs ~1.2 s of
-  start-up where `cscript` needs ~0.1 s. PowerShell is the fallback when VBScript
-  is unavailable. Measured click-to-relaunch on this machine: **≈1.2 s**, down
-  from ≈8.7 s for the first implementation (a `.ps1` helper started through
-  PowerShell with fixed two- and three-second waits).
-- A plugin loaded into Electron's main process (a browser build) uses the
-  documented `app.relaunch()` path instead.
-- Anywhere else the capability reports `restart-unsupported` and the button stays
-  disabled; nothing is guessed at.
-- A restart interrupts turns that are in flight, so the panel counts them first
-  and asks before it goes ahead.
-
-## Install
-
-From npm — the package, the repository and the plugin entry all use one name,
-`dsh-workspace-control`:
+## 安装
 
 ```bash
 dsh plugin --profile web add dsh-workspace-control
 ```
 
-Or from a local checkout:
+从本地 checkout 安装：
 
 ```bash
-plugin_manager install_bundle target=D:\Github\dsh-workspace-control
+plugin_manager install_bundle target=D:\path\to\dsh-workspace-control
 ```
 
-Then verify the loader row exists:
+旧版本以 `dsh-workspace-remaker`、`dsh-workspace-manager` 发布过，安装前先移除：
 
 ```bash
-cordis_inspect_query Config.listConfigs name=dsh-workspace-control
+plugin_manager remove_bundle target=dsh-workspace-manager
 ```
 
-Replacing an older install: this plugin shipped as `dsh-workspace-remaker` and later
-`dsh-workspace-manager`, so drop whichever one is listed:
-`plugin_manager remove_bundle target=dsh-workspace-manager`.
+## Agent 接口
 
-### The panel reports the same activity the sidebar does
+`workspace_control` 工具提供全部操作，按钮只是它的界面包装。
 
-A workspace row says `N running` only when a session really is mid-turn, and it
-gets that answer from the same two sources the shipped sidebar uses:
+| action | 作用 |
+| --- | --- |
+| `inspect` | 只读：会话记录的目录、所属工作区、是否运行、存储格式。 |
+| `move` | 移动单个会话到 `target`。 |
+| `listWorkspaces` | 列出全部工作区、真实会话数与阻塞原因。 |
+| `rebuild` | 把工作区 `workspaceId` 重建到 `target`。 |
+| `merge` | 把 `sourceIds` 合并进 `workspaceId`。 |
+| `retitle` | 修改工作区标题。 |
+| `remove` | 删除工作区记录，`keepSessions` 控制是否保留会话。 |
+| `probeRestart` | 报告重启能力与待打断的回合。 |
+| `restart` | 重启 DSH，`force` 允许打断进行中的回合。 |
+| `refresh` | 热刷新，`mode` 为 `auto`、`plugins`、`interface`。 |
+| `clientModule` | 报告 Client bundle 是否在当前页面的启动图中。 |
 
-```js
-useSessionStatus().get(sessionId)?.running ?? useSessions().byId[sessionId]?.running
+示例：
+
+```text
+workspace_control action=refresh mode=auto
+workspace_control action=restart force=true
+workspace_control action=inspect sessionId=session-<uuid>
+workspace_control action=move sessionId=session-<uuid> target=D:\target
 ```
 
-A session the app merely keeps open is shown as `N open · idle`, its buttons stay
-enabled, and the host releases it before touching any file. When neither source
-knows the session, the panel falls back to the host's own summary instead of
-inventing an answer.
+编辑插件后应调用 `action=refresh`，而不是重启 DSH。只有刷新明确报告需要重启，或改了插件清单与依赖时，才用 `action=restart`。
 
-## The panel
+## 限制
 
-The panel is a card grid rather than a table: each workspace is an
-`article.wsm-card` carrying a status dot, its name, the canvas path, activity
-badges and four actions (rebuild / merge / rename / delete). Actions disable
-themselves only while a session is *running* — a workspace that is merely open
-still operates, because an idle holder is released before the move.
+- 移动会话不改磁盘文件，只改记录的工作目录。
+- 运行中的会话不能移动，先停止再移动。
+- fork 会话保留 `parentSession` 链接与继承偏移；要整理整棵树，先移动父会话。
+- 旧格式会话先打开一次完成升级，再移动。
+- 删除只删记录并归档会话，目录和会话文件不会删除。
+- 嵌套工作区合法，只拒绝无法承载工作区的目标（不存在、不是目录、不可写）。
 
-Styling rides on the host theme instead of hard-coded colours, so the panel
-follows the Harness light/dark switch:
+## 配置与日志
 
-```css
-.wsm-card {
-  border: .5px solid var(--dsw-alias-settings-card-stroke);
-  border-radius: var(--dsw-radius-xl);
-  background: var(--dsw-alias-settings-card-fill);
-}
-.wsm-card:hover { background: var(--dsw-alias-interactive-bg-hover); }
-```
+- `WSC_LOG=0`：关闭日志。
+- 默认写 `.workspace-control.log`（512 KiB 轮转），pending 队列原子替换，崩溃不会留下半个队列。
 
-While the first read is in flight the grid shows three pulsing skeletons, so the
-panel never flashes an empty state. `prefers-reduced-motion` turns the pulse off.
-
-## Design
-
-The panel follows the same page rhythm as the shipped plugin market and
-settings pages: a floored top clearance under the harness frame, a fluid
-16-48px gutter that becomes a centred 960px column on wide windows, hairline
-cards with `--dsw-radius-xl`, and tasks that open as dialogs over the list
-instead of replacing it.
-
-The rules - plus the token list and the ship checklist - live in
-[`docs/design-guidelines.md`](docs/design-guidelines.md). They adapt the
-**unslop** skill by Damir Sokolovsky
-([@heydamir](https://x.com/heydamir), [heydamir/unslop](https://github.com/heydamir/unslop),
-CC BY 4.0) to DSH's token system and its dark and light themes: his nine passes
-and audit signs, DSH's page frame and theme contract. The panel follows them -
-4px grid, three text roles, one accent, hairline borders, sentence-case labels,
-no looping motion, every colour from a `--dsw-*` token with a theme-neutral
-fallback.
-
-The page frame is:
-
-```css
-.frame {
-  padding: calc(28px + var(--dsh-frame-top-clearance, 0px)) 0 0;
-}
-.frame .page {
-  padding-left:  max(max(16px, min(4vw, 48px)), 50% - 480px);
-  padding-right: max(max(16px, min(4vw, 48px)), 50% - 480px);
-}
-```
-
-## Tests
+## 开发
 
 ```bash
-node --test
+npm test
 ```
 
-The suite runs without the harness: `test/fakes.js` stands in for the storage,
-the workspace registry, `sessionController` and the agent registry, publishing
-real files into a throwaway `DSH_HOME`.
+测试不需要启动 harness：`test/fakes.js` 提供存储、工作区注册表与 agent 注册表，真实写文件到临时 `DSH_HOME`。覆盖移动事务、拒绝路径、重启 helper 文本、刷新决策、boot bundle 保留，以及在 `vm` 中双重求值 `client.js` 时只注册一次。
 
-- `paths.test.js` — `samePath` / `titleFollowsPath` / `encodeId` edge cases.
-- `move.test.js` — the whole move transaction: success, a held session, a turn in
-  flight, an empty log, a failing publish, a successor that reads back short, a
-  store that still lists the parked id, and the repair path when a move is
-  repeated.
-- `contract.test.js` — loads `client.js` in a `vm` and asserts the Client mounts
-  exactly the descriptors the Host registers (ids, namespaces, parameter wires)
-  and that both locale dictionaries carry the same keys.
-- `restart.test.js` -- the helper text: the image kill, the process-tree kill,
-  the socket poll, and the give-up branch that never starts a second instance.
-- `scripts/sync-contract.mjs` runs first and fails the suite when the Client
-  mirror of the descriptor list drifts from `index.js`, which is canonical.
-  `npm run sync:contract` regenerates the mirror.
+`scripts/sync-contract.mjs` 校验 Client 侧描述符镜像与 `index.js` 一致，`npm run sync:contract` 重新生成。界面规范见 [docs/design-guidelines.md](docs/design-guidelines.md)。
 
-## Diagnostics and two knobs
+## 链接
 
-`WSC_LOG=0` in the host environment makes the plugin silent; by default it
-writes `.workspace-control.log` next to the package, rolls it over at 512 KiB,
-and replaces the pending queue atomically, so a crash cannot leave half a
-queue behind.
-
-## Notes and limits
-
-- Moving a session does not move the files on disk. Only the session's recorded
-  working directory changes.
-- Nested workspaces are legal in current DSH builds, so nesting is not refused;
-  only a target that cannot host a workspace (missing, not a directory, not
-  writable) is.
-- Sessions stored in an older format report `migration-required`; open them once
-  so the harness upgrades them, then move them.
-- A forked session keeps its `parentSession` link and its inherited event offset;
-  the parent stays where it is, so move parents first if you want the whole tree
-  in one directory.
-- The move is refused while the session runs. Stop it, move it, re-open it.
-- A session the app has open but idle used to be refused: the store keeps its write
-  ownership, so no successor artifact can be published for it. The plugin now
-  releases an idle holder first (`#releaseHeld` disposes the agent's own Cordis
-  scope and re-reads the registry to confirm) and only refuses when the release
-  did not happen. A session mid-turn is still refused: it has real work to finish.
-- Every seat draws the same occupancy chips from `listWorkspaces`, so a blocked
-  workspace is visible before a button is pressed.
-- `删除 / Delete` removes the record only; the directory and its session files are
-  left on disk, and the sessions are archived so they are easy to find again.
-- The plugin never edits committed bytes: it publishes a successor through
-  `sessionPersistence`, so the store's no-rewrite rule and framing checks stay
-  intact.
-
-## Verification
-
-```bash
-# 1. the loader row exists and the bundle applied
-cordis_inspect_query Config.listConfigs name=dsh-workspace-control
-# 2. the Client half registered its three seats (live Slots tree)
-cordis_inspect_query Slots.listSubTree root=sidebar.panellist
-cordis_inspect_query Slots.listSubTree root=main
-cordis_inspect_query Slots.listSubTree root=sidebar.workspaces.session.menu.item
-```
-
-`sidebar.panellist` and `main` both carry the id `workspace-control`; the first is
-the sidebar button, the second the panel it dispatches. The same panel is also
-reachable from `settings.section` (id `workspace-control-settings`).
-
-Finished results retire on their own after a few seconds, so an operation that
-succeeded cannot leave a banner sitting in the panel.
-
-The offline checks (no harness needed) cover the refusal paths, `inspect`, and the
-boot self-heal against a fake registry:
-
-```bash
-node .scratch/smoke.mjs
-```
-
-The same operation is reachable by the agent as the `workspace_control` tool, so
-the move can be exercised without the UI:
-
-```
-workspace_control { "action": "inspect", "sessionId": "session-<uuid>" }
-workspace_control { "action": "move", "sessionId": "session-<uuid>", "target": "D:\\target" }
-```
-
-`action=listWorkspaces` reports every workspace with its real session count and
-its blockers (`running` / `open`), which is the same data the panel draws its
-occupancy chips from. `action=inspect` is read-only and reports the recorded
-directory, the owning workspace, whether the session runs, and the storage format. `action=move`
-performs the move. Every step appends a line to `.workspace-control.log` next to this
-package, which is the first place to look when a move refuses.
-
-## The cached title follows the header
-
-The Session list builds its projection column from
-`sessionProjectionCache.cachedSnapshot(header)`, and that read only matches a
-stored record whose lifecycle identity (`formatVersion`, `createdAt`, `cwd`,
-`isSeeded`) equals the header it is handed. A move rewrites `cwd` in the header,
-so the record written before the move stops matching and the sidebar renders the
-row as “未命名” (unnamed) even though the cached title row is intact.
-
-A move therefore ends with a cold projection read off the complete log
-(`sessionProjectionCache.coldSnapshot(header, inheritedEventCount, events)`),
-which folds the log against the new identity and writes a fresh checkpoint
-back. `action=move` reports the outcome as `projections: { asOfSeq, keys }`, and
-repeating a move to the directory a session already lives in re-runs only this
-repair step.
-
-## Reloading the plugin without restarting the harness
-
-The host half is reloaded by toggling its entry through the plugin manager —
-`plugin_manager` `set_plugin` with `target: "include:workspace-control"`,
-`enabled: false` then `enabled: true` — which re-imports `index.js` in place. The
-client half is refreshed with the page. Neither needs a DSH restart.
+- 仓库：https://github.com/QIUZAIYOU/dsh-workspace-control
+- 问题：https://github.com/QIUZAIYOU/dsh-workspace-control/issues
+- 许可证：MIT

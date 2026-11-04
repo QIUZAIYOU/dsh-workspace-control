@@ -20,7 +20,9 @@
  * holds two artifacts for one id and never holds none.
  */
 
-import { helperScript, launcherScript } from './restart.js';
+import { helperScript, launcherScript, powerShellLauncherCommand } from './restart.js';
+import { refreshWithHmr } from './refresh.js';
+import { bootBundleStatus, retainBootBundles } from './retain.js';
 
 import {
   access,
@@ -241,6 +243,7 @@ export const DESCRIPTORS = Object.freeze([
   method('releaseSession', [{ wire: 'sessionId', codec: sessionIdCodec }]),
   method('probeRestart', []),
   method('clientModule', []),
+  method('refresh', []),
   method('restart', [{ wire: 'force', codec: booleanCodec }]),
 ]);
 
@@ -797,13 +800,10 @@ class WorkspaceControl {
   /** The WMI call through PowerShell, kept for hosts without usable cscript. */
   async #launchViaPowerShell(script) {
     const inner = ['cmd.exe', '/c', `"${script}"`].join(' ');
-    // Single quotes are the only thing that needs escaping inside the WMI call.
-    const literal = `'${inner.replace(/'/g, "''")}'`;
-    const command = [
-      '$ErrorActionPreference = "Stop"',
-      `$created = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ${literal} }`,
-      'Write-Output ("{0} {1}" -f $created.ReturnValue, $created.ProcessId)',
-    ].join('; ');
+    // The helper itself has to be created hidden: an ordinary console window
+    // is handed to Windows Terminal on Windows 11, which is the flash this
+    // fallback used to show while the helper ran.
+    const command = powerShellLauncherCommand({ inner });
 
     return await new Promise((resolve) => {
       let stdout = '';
@@ -898,6 +898,45 @@ class WorkspaceControl {
     } catch (error) {
       return { ...base, status: 'error', code: 'unreadable', entries: null, reason: describe(error) };
     }
+  }
+
+  /**
+   * Reload the Host-side plugin code, then republish the Client bundles whose
+   * bytes changed on disk, without restarting the process.
+   *
+   * This is the Host half of the Refresh button. The plugin reload goes through
+   * the official HMR service (the plugin manager uses the same call): it re-reads
+   * the profile, evicts the modules whose files changed and re-applies the
+   * Loader entries from disk. Only after that does the Client sweep republish the
+   * new bundles, so the page receives the graph the reloaded Host serves. The
+   * decision of what the page may do with it lives in refresh.js, one rule for
+   * the Client half, the agent tool and the tests.
+   *
+   * @param {'auto'|'plugins'|'interface'} [mode] plugins = Host code only,
+   *   interface = Client bundles only, auto = both (the default)
+   */
+  async refresh(mode = 'auto') {
+    const guard = this.#guard();
+    if (guard) return guard;
+    const selected = mode === 'plugins' || mode === 'interface' ? mode : 'auto';
+    const modules = field(this.#ctx.get?.('clientModules'), 'graph') !== undefined
+      ? this.#ctx.get('clientModules')
+      : null;
+    // Re-learn the boot bundles before the sweep rotates the served table: a
+    // Host that started after this plugin was loaded has no snapshot yet.
+    if (modules !== null) retainBootBundles(modules);
+    const value = await refreshWithHmr({
+      hmr: peek(this.#ctx, 'hmr') ?? null,
+      loader: peek(this.#ctx, 'loader') ?? null,
+      modules,
+      selfId: PACKAGE,
+      mode: selected,
+    });
+    // Whether a document load can still resolve the frozen boot manifest. The
+    // page decides from this whether reloading is safe (see retain.js).
+    value.reload = bootBundleStatus(modules);
+    // The graph is a live Host object; the seam serializes across processes.
+    return JSON.parse(JSON.stringify(value));
   }
 
   /** Read-only: whether this process can restart the app, and what it would do. */
@@ -2474,7 +2513,7 @@ const plain = (value) => {
 const TOOL = {
   name: 'workspace_control',
   description:
-    'Manage stored sessions and workspaces without losing ids, titles, history or tool records. action=inspect reports one session; action=move relocates one session to `target`; action=listWorkspaces reports every workspace with its stored-session count and how many of those are held by the app or mid-turn; action=rebuild re-homes a whole workspace onto `target` and replaces the record there; action=merge folds the workspaces in `sourceIds` into `workspaceId`; action=retitle renames one workspace; action=remove deletes one workspace record (its sessions are archived first unless keepSessions is true); action=probeRestart reports whether this process can restart DSH; action=restart restarts DSH (pass force to interrupt a turn in flight). Held or mid-turn sessions refuse the whole call first, and nothing moves when the pre-flight fails.',
+    'Manage stored sessions and workspaces without losing ids, titles, history or tool records. action=inspect reports one session; action=move relocates one session to `target`; action=listWorkspaces reports every workspace with its stored-session count and how many of those are held by the app or mid-turn; action=rebuild re-homes a whole workspace onto `target` and replaces the record there; action=merge folds the workspaces in `sourceIds` into `workspaceId`; action=retitle renames one workspace; action=remove deletes one workspace record (its sessions are archived first unless keepSessions is true); action=probeRestart reports whether this process can restart DSH; action=restart restarts DSH (pass force to interrupt a turn in flight); action=refresh reloads edited plugin code and republishes the interface without restarting DSH (this is the agent-facing Refresh button — use it instead of restarting after editing a plugin). Held or mid-turn sessions refuse the whole call first, and nothing moves when the pre-flight fails.',
   parameters: {
     type: 'object',
     properties: {
@@ -2492,10 +2531,20 @@ const TOOL = {
           'release',
           'probeRestart',
           'restart',
+          'refresh',
           'clientModule',
         ],
         description:
-          'inspect reports one session; move relocates one session; listWorkspaces reports every workspace with its stored-session count and blockers; rebuild re-homes a whole workspace onto `target`; merge folds `sourceIds` into `workspaceId`; retitle sets one workspace title; remove deletes one workspace record; probeRestart reports the restart plan; restart restarts DSH; clientModule reports whether the Client bundle is part of the Web boot graph.',
+          'inspect reports one session; move relocates one session; listWorkspaces reports every workspace with its stored-session count and blockers; rebuild re-homes a whole workspace onto `target`; merge folds `sourceIds` into `workspaceId`; retitle sets one workspace title; remove deletes one workspace record; probeRestart reports the restart plan; restart restarts DSH; refresh reloads edited plugin code and republishes the interface (no restart); clientModule reports whether the Client bundle is part of the Web boot graph.',
+      },
+      force: {
+        type: 'boolean',
+        description: 'For restart: interrupt a turn that is still running.',
+      },
+      mode: {
+        type: 'string',
+        enum: ['auto', 'plugins', 'interface'],
+        description: 'For refresh: plugins reloads Host plugin code only, interface republishes Client bundles only, auto (default) does both.',
       },
       sessionId: { type: 'string', description: 'Exact session id, such as session-<uuid>. Required for inspect and move.' },
       workspaceId: {
@@ -2532,6 +2581,7 @@ const dispatch = async (service, args) => {
   if (action === 'release') return service.releaseSession(args.sessionId);
   if (action === 'probeRestart') return service.probeRestart();
   if (action === 'clientModule') return service.clientModule();
+  if (action === 'refresh') return service.refresh(args.mode);
   if (action === 'restart') return service.restart(args.force);
   return service.inspect(args.sessionId);
 };
@@ -2548,6 +2598,31 @@ function applyEntry(ctx) {
 
   const service = new WorkspaceControl(ctx);
   ctx.provide(NAMESPACE, service);
+
+  // See retain.js. The desktop shell replays ONE boot manifest into every later
+  // document load, while the registry keeps only the current and previous bundle
+  // table; retaining the boot responses is what keeps F5 (or another plugin's
+  // reload button) from aborting the next boot. Installed eagerly so a build
+  // that already bound the service is covered, and again through a scoped inject
+  // for the usual case where the service appears after this entry applied.
+  const retainBundles = (owner) => {
+    try {
+      const modules = field(owner.get?.('clientModules'), 'graph') !== undefined
+        ? owner.get('clientModules')
+        : peek(owner, 'clientModules');
+      if (modules) retainBootBundles(modules);
+    } catch (error) {
+      debug('bundle-retention-failed', describe(error));
+    }
+  };
+  retainBundles(ctx);
+  if (typeof ctx.inject === 'function') {
+    try {
+      ctx.inject(['clientModules'], (child) => { retainBundles(child); });
+    } catch (error) {
+      debug('bundle-retention-inject-failed', describe(error));
+    }
+  }
 
   // Every registration is disposable: the plugin is reloaded in place with
   // `plugin_manager set_plugin`, and a stale namespace or tool row would then

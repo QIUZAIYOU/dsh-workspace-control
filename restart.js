@@ -52,12 +52,31 @@ export const helperScript = (options) => `${HELPER_LINES(options).join(CRLF)}${C
 export const launcherScript = ({ inner }) => [
   'Option Explicit',
   'Dim wmi, service, startup, result, code',
-  'Set wmi = GetObject("winmgmts:\\.\root\cimv2")',
+  'Set wmi = GetObject("winmgmts:\\\\.\\root\\cimv2")',
   'Set service = wmi.Get("Win32_Process")',
   'Set startup = wmi.Get("Win32_ProcessStartup").SpawnInstance_',
   'startup.ShowWindow = 0',
   `code = service.Create("${String(inner).replace(/"/g, '""')}", Null, startup, result)`,
   'WScript.Quit code',
 ].join(CRLF);
+
+/**
+ * The same hidden WMI call through PowerShell, for hosts without VBScript.
+ *
+ * Invoke-CimMethod with no startup object creates the helper with an ordinary
+ * console window, and Windows 11 hands that window to Windows Terminal: the
+ * launcher is invisible but a terminal flashes on screen for as long as the
+ * helper runs. Win32_Process.Create with ShowWindow = 0 is the hidden path,
+ * and it is the same call the VBScript launcher makes.
+ */
+const psLiteral = (text) => "'" + String(text).replace(/'/g, "''") + "'";
+
+export const powerShellLauncherCommand = ({ inner }) => [
+  '$ErrorActionPreference = "Stop"',
+  '$startup = ([wmiclass]"Win32_ProcessStartup").CreateInstance()',
+  '$startup.ShowWindow = 0',
+  '$created = ([wmiclass]"Win32_Process").Create(' + psLiteral(inner) + ', $null, $startup)',
+  'Write-Output ("{0} {1}" -f $created.ReturnValue, $created.ProcessId)',
+].join('; ');
 
 export const CRLF_TEXT = CRLF;

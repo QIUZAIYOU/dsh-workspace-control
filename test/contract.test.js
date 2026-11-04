@@ -168,6 +168,7 @@ test('a Client context without the optional services still registers the UI', as
     'workspace-control',
     'workspace-control-dialog',
     'workspace-control-move',
+    'workspace-control-refresh',
     'workspace-control-settings',
   ].sort());
 });

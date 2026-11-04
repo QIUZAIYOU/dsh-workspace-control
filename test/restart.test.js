@@ -46,3 +46,23 @@ test('the launcher quotes the command for WMI and hides the window', () => {
   assert.ok(body.includes('service.Create("cmd.exe /c """"C:\tmp\a.cmd""""", Null, startup, result)'));
   assert.ok(body.includes('WScript.Quit code'));
 });
+
+test('the launcher addresses the local WMI namespace without a broken escape', () => {
+  // The JS source needs four backslashes: with two, "\root" parses as a
+  // carriage return, the moniker is invalid, and cscript exits 1 with an empty
+  // stderr. That failure is silent — the PowerShell fallback takes over — so
+  // the fast path stayed dead until this test existed.
+  const body = launcherScript({ inner: 'x' });
+  const moniker = lines(body).find((line) => line.includes('winmgmts'));
+  assert.equal(moniker, 'Set wmi = GetObject("winmgmts:\\\\.\\root\\cimv2")');
+  assert.ok(!/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(body), 'a control character means the escape is wrong');
+});
+
+test('the PowerShell fallback creates the helper hidden as well', async () => {
+  const { powerShellLauncherCommand } = await import('../restart.js');
+  const command = powerShellLauncherCommand({ inner: 'cmd.exe /c "C:\\tmp\\a.cmd"' });
+  assert.ok(command.includes('$startup.ShowWindow = 0'), 'the fallback must hide the console window');
+  assert.ok(command.includes('([wmiclass]"Win32_Process").Create('), 'the fallback must create through WMI');
+  assert.ok(!command.includes('Invoke-CimMethod'), 'Invoke-CimMethod without a startup object shows a console window');
+  assert.ok(command.includes("Create('cmd.exe /c \"C:\\tmp\\a.cmd\"', $null, $startup)"));
+});

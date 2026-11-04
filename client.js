@@ -1,3 +1,12 @@
+/*
+ * This file is served as a classic script and the page can evaluate it twice in
+ * one document (its own startup script plus the composed batch). At top level
+ * that would redeclare every `const` below, which is a parse-time SyntaxError
+ * that aborts the entire boot round instead of just skipping the duplicate.
+ * Everything therefore lives inside this closure, and the registration at the
+ * bottom is guarded as well.
+ */
+(function () {
 /**
  * Client half of dsh-workspace-control.
  *
@@ -19,6 +28,7 @@ function build(require) {
     const SLOT = 'sidebar.workspaces.session.menu.item';
     const SETTINGS = 'settings.section';
     const OVERLAY = 'shell.overlay';
+    const HEADER_UTILITIES = 'conversation.session.header.utilities';
     const MAIN = 'main';
     const PANEL = 'sidebar.panellist';
     const PANEL_KEY = 'workspace-control';
@@ -121,6 +131,7 @@ function build(require) {
       method('releaseSession', [{ wire: 'sessionId', codec: sessionIdCodec }]),
       method('probeRestart', []),
       method('clientModule', []),
+      method('refresh', []),
       method('restart', [{ wire: 'force', codec: booleanCodec }]),
     ]);
 
@@ -187,6 +198,49 @@ function build(require) {
       restarting: { zh: '正在重启…', en: 'Restarting…' },
       doRestart: { zh: '立即重启', en: 'Restart now' },
       back: { zh: '返回', en: 'Back' },
+      refreshDsh: { zh: '刷新界面', en: 'Refresh UI' },
+      refreshHint: {
+        zh: '重新发布插件改动，不重启 DSH；正在生成的那一轮不会被中断。',
+        en: 'Republish plugin changes without restarting DSH; a turn in progress is not interrupted.',
+      },
+      refreshing: { zh: '正在刷新…', en: 'Refreshing…' },
+      refreshedHot: {
+        zh: '已热更新 {n} 个插件，页面没有重载。',
+        en: 'Hot-swapped {n} plugin(s); the page was not reloaded.',
+      },
+      refreshedCurrent: {
+        zh: '没有插件改动，界面已是最新。',
+        en: 'No plugin changed; the interface is already current.',
+      },
+      refreshSplash: { zh: '正在刷新界面…', en: 'Refreshing the interface…' },
+      reloadUnsafe: {
+        zh: '另外：直接重载页面可能打不开 DSH，请只用本插件的刷新。',
+        en: 'Also: reloading the page itself may fail to start DSH; use the refresh button in this plugin.',
+      },
+      refreshedNeedsRestart: {
+        zh: '热更新没有生效：这个页面和当前的 Host 不是同一版本。插件改动需要重启 DSH 才会完整生效。',
+        en: 'The hot swap did not take effect: this page belongs to a different Host release. Restart DSH to pick up the plugin change in full.',
+      },
+      refreshedPlugins: {
+        zh: '已重载 {n} 个在跑的插件代码，页面没有重载。',
+        en: 'Reloaded the code of {n} running plugin(s); the page was not reloaded.',
+      },
+      refreshedPartial: {
+        zh: '插件已重载，但有 {n} 个入口没有就绪，界面可能不完整。',
+        en: 'Plugins reloaded, but {n} entry point(s) did not come back; the interface may be incomplete.',
+      },
+      refreshNoHmr: {
+        zh: '这个构建没有热更新服务，插件代码没有重载，界面已刷新。',
+        en: 'This build offers no hot-reload service, so plugin code was not reloaded; the interface was refreshed.',
+      },
+      refreshReloadFailed: {
+        zh: '界面已刷新，但插件代码重载失败。',
+        en: 'The interface was refreshed, but the plugin code could not be reloaded.',
+      },
+      refreshUnsupported: {
+        zh: '这个构建没有可用的客户端模块表，界面无法刷新。',
+        en: 'This build exposes no client module table, so the interface cannot be refreshed.',
+      },
       code: {
         moved: { zh: '会话已移动。', en: 'The session moved.' },
         attached: {
@@ -255,6 +309,40 @@ function build(require) {
           zh: '这个构建不能自己重启，请手动退出后再启动。',
           en: 'This build cannot restart itself; quit and start it again by hand.',
         },
+        refreshed: { zh: '界面已刷新。', en: 'The interface is refreshed.' },
+        'refreshed-unchanged': {
+          zh: '没有插件改动，界面保持原样。',
+          en: 'No plugin changed; the interface was left as it is.',
+        },
+        'refreshed-hot': {
+          zh: '已热更新插件，页面没有重载。',
+          en: 'Plugins were hot-swapped; the page was not reloaded.',
+        },
+        'refreshed-needs-restart': {
+          zh: '热更新没有生效，插件改动需要重启 DSH 才会完整生效。',
+          en: 'The hot swap did not take effect; restart DSH to apply the plugin change in full.',
+        },
+        'refresh-unsupported': {
+          zh: '这个构建没有可用的客户端模块表，界面无法刷新。',
+          en: 'This build exposes no client module table, so the interface cannot be refreshed.',
+        },
+        'refreshed-plugins': {
+          zh: '在跑的插件代码已重载，页面没有重载。',
+          en: 'The code of the running plugins was reloaded; the page was not reloaded.',
+        },
+        'refreshed-partial': {
+          zh: '插件已重载，但有入口没有就绪，界面可能不完整。',
+          en: 'Plugins reloaded, but some entry points did not come back; the interface may be incomplete.',
+        },
+        'refresh-no-hmr': {
+          zh: '这个构建没有热更新服务，插件代码没有重载，界面已刷新。',
+          en: 'This build offers no hot-reload service, so plugin code was not reloaded; the interface was refreshed.',
+        },
+        'refresh-reload-failed': {
+          zh: '界面已刷新，但插件代码重载失败。',
+          en: 'The interface was refreshed, but the plugin code could not be reloaded.',
+        },
+        'refresh-failed': { zh: '刷新失败了。', en: 'The refresh failed.' },
         rebuilt: {
           zh: '工作区已重建，会话都跟着搬过去了。刷新页面即可看到。',
           en: 'The workspace was rebuilt and its sessions moved with it. Refresh to see it.',
@@ -435,6 +523,10 @@ function build(require) {
       // Host-reported capability flags; a false one means the build changed and
       // some repairs fell back to a degraded path.
       internals: null,
+      // Refresh runs on its own axis: it must stay usable while the panel is
+      // idle, and it must not be disabled by an unrelated move's phase.
+      refreshPhase: 'idle',
+      refreshNotice: null,
     };
 
     const listeners = new Set();
@@ -442,6 +534,17 @@ function build(require) {
       for (const listener of listeners) listener();
     };
     let dismissTimer = null;
+    // A corner-button outcome is shown away from the panel, so it has its own
+    // timer: clearing a panel result must never eat a toast (or the reverse).
+    let noticeTimer = null;
+
+    const armNotice = (ms) => {
+      if (noticeTimer !== null) clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(() => {
+        noticeTimer = null;
+        patch({ refreshNotice: null });
+      }, ms);
+    };
 
     const patch = (changes) => {
       Object.assign(store, changes);
@@ -624,13 +727,23 @@ function build(require) {
 
     // One code table decides the accent everywhere: the result card, the dialog
     // banner and the auto-dismiss rule all read from these two sets.
-    const OK_CODES = new Set(['moved', 'attached', 'rebuilt', 'merged', 'retitled', 'removed']);
+    const OK_CODES = new Set([
+      'moved',
+      'attached',
+      'rebuilt',
+      'merged',
+      'retitled',
+      'removed',
+      'refreshed',
+      'refreshed-unchanged',
+    ]);
     const PARTIAL_CODES = new Set([
       'moved-unverified',
       'moved-unattached',
       'moved-unreprojected',
       'attached-unreprojected',
       'merged-partial',
+      'refreshed-hot',
     ]);
     const outcomeOf = (value) => {
       const code = value && value.code;
@@ -1278,6 +1391,28 @@ function build(require) {
       .wsm-check{display:flex;align-items:flex-start;gap:8px;font-size:12px;color:var(--dsw-alias-label-secondary,rgba(127,127,127,1));cursor:pointer}
       .wsm-check input{margin-top:2px}
       .wsm-error{color:var(--dsw-alias-label-error,#e06a6a);font-size:12px}
+      /* Session-header refresh seat: an in-flow item of the header's utilities
+         row, so it lines up beside DSH's own corner button instead of covering it. */
+      .wsm-refreshSeat{display:flex;align-items:center;flex:none}
+      .wsm-refreshBtn{display:grid;place-items:center;width:24px;height:24px;padding:0;color:var(--dsw-alias-label-secondary,rgba(127,127,127,1));background:transparent;border:.5px solid transparent;border-radius:var(--dsw-radius-sm,6px);cursor:pointer;transition:background .16s,border-color .16s,color .16s}
+      .wsm-refreshBtn:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.14));color:var(--dsw-alias-label-primary,#8a8a8a)}
+      .wsm-refreshBtn:disabled{cursor:default;color:var(--dsw-alias-label-tertiary,rgba(127,127,127,.95))}
+      .wsm-spin{width:14px;height:14px;border:1.5px solid currentColor;border-right-color:transparent;border-radius:50%;animation:wsm-spin .7s linear infinite}
+      @keyframes wsm-spin{to{transform:rotate(360deg)}}
+      /* Refresh splash. A bundle swap finishes in well under a second, so the
+         veil fades in only after 120ms and never appears for a fast refresh. */
+      .wsm-loading{position:fixed;inset:0;z-index:90;display:flex;align-items:center;justify-content:center;pointer-events:none;background:rgba(0,0,0,0);animation:wsm-veil .18s ease-out .12s forwards}
+      .wsm-loadingCard{display:flex;align-items:center;gap:10px;padding:12px 16px;font-size:12px;line-height:1.4;color:var(--dsw-alias-label-primary,#8a8a8a);background:var(--dsw-alias-bg-l3,rgba(30,30,32,.97));border:.5px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-radius:var(--dsw-radius-lg,10px);box-shadow:0 10px 30px rgba(0,0,0,.20);opacity:0;animation:wsm-card .18s ease-out .12s forwards}
+      @keyframes wsm-veil{to{background:rgba(0,0,0,.24)}}
+      @keyframes wsm-card{to{opacity:1}}
+      .wsm-toast{position:fixed;right:16px;bottom:16px;z-index:80;max-width:min(46ch,calc(100vw - 32px));padding:10px 12px;font-size:12px;line-height:1.45;color:var(--dsw-alias-label-primary,#8a8a8a);background:var(--dsw-alias-bg-l3,rgba(30,30,32,.97));border:.5px solid var(--dsw-alias-border-l2,rgba(127,127,127,.22));border-left:2px solid var(--dsw-alias-state-business-primary,#5865f2);border-radius:var(--dsw-radius-md,8px);box-shadow:0 8px 24px rgba(0,0,0,.18)}
+      .wsm-toast[data-tone=warn]{border-left-color:#d9a441}
+      .wsm-toast[data-tone=error]{border-left-color:var(--dsw-alias-label-error,#e06a6a)}
+      @media (prefers-reduced-motion:reduce){
+        .wsm-spin{animation-duration:2.4s}
+        .wsm-loading{animation:none;background:rgba(0,0,0,.24)}
+        .wsm-loadingCard{animation:none;opacity:1}
+      }
     `;
 
     /* ------------------------------------------------------ workspace panel */
@@ -1474,6 +1609,17 @@ function build(require) {
               ),
               h(
                 'button',
+                {
+                  type: 'button',
+                  className: 'wsm-ghost',
+                  onClick: () => runRefresh('panel'),
+                  disabled: state.refreshPhase === 'running',
+                  title: t('refreshHint'),
+                },
+                state.refreshPhase === 'running' ? t('refreshing') : t('refreshDsh'),
+              ),
+              h(
+                'button',
                 { type: 'button', className: 'wsm-ghost', onClick: () => loadWorkspaces(), disabled: busy },
                 t('refreshList'),
               ),
@@ -1567,6 +1713,17 @@ function build(require) {
             'div',
             { className: 'wsm-actions' },
             h('button', { type: 'button', className: 'wsm-ghost', onClick: toList, disabled: busy }, t('cancel')),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'wsm-ghost',
+                onClick: () => runRefresh('panel'),
+                disabled: state.refreshPhase === 'running',
+                title: t('refreshHint'),
+              },
+              state.refreshPhase === 'running' ? t('refreshing') : t('refreshDsh'),
+            ),
             h(
               'button',
               {
@@ -1908,11 +2065,108 @@ function build(require) {
       );
     }
 
-    /** One overlay occupant, kept for the session-level move dialog. */
+    /** The round-arrow glyph for the header refresh seat. */
+    function RefreshGlyph() {
+      return h(
+        'svg',
+        {
+          width: 14,
+          height: 14,
+          viewBox: '0 0 16 16',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.4,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+          'aria-hidden': 'true',
+        },
+        h('path', { d: 'M13.2 8a5.2 5.2 0 1 1-1.53-3.68' }),
+        h('path', { d: 'M13.4 2.9v2.6h-2.6' }),
+      );
+    }
+
+    /**
+     * The session-header refresh seat.
+     *
+     * It rides in `conversation.session.header.utilities`, the public list slot
+     * that the conversation header lays out with flexbox just before its corner
+     * seat — the seat DSH's own "open sidebar" button owns. Being in that flow is
+     * the whole point: two flex items cannot cover each other, while a fixed
+     * overlay in the same corner did.
+     */
+    function HeaderRefresh() {
+      const state = useStore();
+      const running = state.refreshPhase === 'running';
+      return h(
+        'div',
+        { className: 'wsm-refreshSeat', key: 'refresh' },
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'wsm-refreshBtn',
+            onClick: () => runRefresh('header'),
+            disabled: running,
+            title: running ? t('refreshing') : t('refreshHint'),
+            'aria-label': t('refreshDsh'),
+            'data-running': running ? 'true' : 'false',
+          },
+          running ? h('span', { className: 'wsm-spin', 'aria-hidden': 'true' }) : RefreshGlyph(),
+        ),
+      );
+    }
+
+    /** Outcome of a corner refresh, announced politely and retired on its own. */
+    function RefreshToast() {
+      const state = useStore();
+      const notice = state.refreshNotice;
+      if (!notice) return null;
+      return h(
+        'div',
+        {
+          className: 'wsm-toast',
+          key: 'toast',
+          role: 'status',
+          'aria-live': 'polite',
+          'data-tone': notice.tone || 'ok',
+        },
+        notice.text,
+      );
+    }
+
+    /**
+     * What a refresh looks like while it runs.
+     *
+     * This is deliberately not DSH's own boot screen: a hot swap never reloads
+     * the document, so the boot splash cannot appear. The veil marks the few
+     * hundred milliseconds in which the fiber tree is replaced.
+     */
+    function RefreshSplash() {
+      const state = useStore();
+      if (state.refreshPhase !== 'running') return null;
+      return h(
+        'div',
+        { className: 'wsm-loading', key: 'loading', role: 'status', 'aria-live': 'polite' },
+        h(
+          'div',
+          { className: 'wsm-loadingCard' },
+          h('span', { className: 'wsm-spin', 'aria-hidden': 'true' }),
+          h('span', null, t('refreshSplash')),
+        ),
+      );
+    }
+
+    /** Permanent overlay: the toast and the session dialog outlive each other. */
     function Shell() {
       const state = useStore();
-      if (!state.open || state.mode !== 'session') return null;
-      return h(Dialog);
+      const open = state.open === true && state.mode === 'session';
+      return h(
+        React.Fragment,
+        null,
+        h(RefreshSplash, { key: 'splash' }),
+        h(RefreshToast, { key: 'toast' }),
+        open ? h(Dialog, { key: 'dialog' }) : null,
+      );
     }
 
     /* ------------------------------------------------------------------ flow */
@@ -2001,6 +2255,213 @@ function build(require) {
       } catch (error) {
         patch({ phase: 'error', error: describeError(error) });
       }
+    }
+
+    /**
+     * Whether this page may rebuild itself by reloading the document.
+     *
+     * The rule mirrors refresh.js on the Host half, which this bundle cannot
+     * import. Only a plain web page reloads: the desktop shell freezes its boot
+     * manifest at window start, and one crash proved that even a matching
+     * revision can mix two generations in that manifest, so a reload there can
+     * ask for plugin batch URLs that no longer exist and kill the boot.
+     */
+    function decideRefresh({ isDesktop, bootRev, liveRev, changed }) {
+      if (!isDesktop) return { action: 'reload', reason: 'web' };
+      if (Array.isArray(changed) && changed.length > 0) return { action: 'sync', reason: 'changed' };
+      const known = (rev) => typeof rev === 'string' && rev !== '';
+      if (!known(bootRev) || !known(liveRev)) return { action: 'sync', reason: 'unknown' };
+      if (bootRev !== liveRev) return { action: 'sync', reason: 'stale-boot' };
+      return { action: 'sync', reason: 'current' };
+    }
+
+    /**
+     * Republish plugin bundles, then rebuild the interface by the one route that
+     * is safe on this page: a desktop shell hot-syncs the client graph in place
+     * (never reloading), while plain web may reload when its boot graph is current.
+     */
+    async function runRefresh(source) {
+      if (store.refreshPhase === 'running') return;
+      patch({ refreshPhase: 'running', refreshNotice: null });
+
+      // Set once the Host reported whether a document load is still safe. The
+      // last sentence of a success is where a warning about reloading belongs.
+      let extra = '';
+      const finish = (code, message, tone) => {
+        const text = extra !== '' && (tone === 'ok' || tone === 'warn') ? `${message} ${extra}` : message;
+        // The boot reconcile runs on its own; it must not leave a result card
+        // behind or announce itself, only release the spinner.
+        if (source === 'silent') {
+          patch({ refreshPhase: 'idle' });
+          return;
+        }
+        if (source === 'header') {
+          patch({ refreshPhase: 'idle', refreshNotice: { tone, text } });
+          armNotice(DISMISS_MS);
+          return;
+        }
+        patch({ refreshPhase: 'idle', phase: 'done', result: { code, message: text } });
+      };
+
+      let settled;
+      try {
+        settled = settle(await callRemote('refresh'));
+      } catch (error) {
+        settled = { error: describeError(error) };
+      }
+
+      if (settled.error) {
+        patch({ refreshPhase: 'idle' });
+        if (source === 'header') {
+          patch({ refreshNotice: { tone: 'error', text: settled.error } });
+          armNotice(DISMISS_MS);
+        } else {
+          patch({ phase: 'error', error: settled.error });
+        }
+        return;
+      }
+
+      const value = settled.value || settled.refusal || null;
+      if (!value || value.status === 'error') {
+        const code = value && typeof value.code === 'string' ? value.code : 'refresh-failed';
+        const text = code === 'unsupported' ? t('refreshUnsupported') : codeText(code);
+        finish(code === 'unsupported' ? 'refresh-unsupported' : 'refresh-failed', text, 'error');
+        return;
+      }
+
+      const liveRev = typeof value.rev === 'string' ? value.rev : null;
+      const changed = Array.isArray(value.changed) ? value.changed : [];
+      // The Host retains the boot-generation bundles so a document load cannot
+      // 404 mid-boot; when it could not, say so: another plugin's reload button
+      // (or F5) is then the thing that breaks startup.
+      const reload = value.reload && typeof value.reload === 'object' ? value.reload : null;
+      if (reload !== null && reload.safe === false) extra = t('reloadUnsafe');
+      // The Host half reloads plugin code before republishing bundles. Its report
+      // is three-way on purpose: plugins can reload while the page sync fails, or
+      // the interface can refresh while the plugin set still needs a restart.
+      const plugins = value.plugins && typeof value.plugins === 'object' ? value.plugins : null;
+      const applied = plugins && Array.isArray(plugins.applied) ? plugins.applied.length : 0;
+      const unhealthy = plugins && Array.isArray(plugins.pending) ? plugins.pending.length : 0;
+      const warned = plugins && Array.isArray(plugins.warnings) ? plugins.warnings.length : 0;
+      const restartReason =
+        plugins && typeof plugins.restartReason === 'string' && plugins.restartReason !== ''
+          ? plugins.restartReason
+          : null;
+      const restartOnly = plugins !== null && plugins.restartOnly === true;
+
+      const boot = globalThis.__DSH_BOOT__;
+      const bootRev = boot && typeof boot.rev === 'string' ? boot.rev : null;
+      const isDesktop =
+        (typeof globalThis.location !== 'undefined' && globalThis.location.protocol === 'dsh-app:') ||
+        typeof globalThis.dshDesktopBoot !== 'undefined';
+
+      const decision = decideRefresh({ isDesktop, bootRev, liveRev, changed });
+      if (decision.action === 'reload') {
+        patch({ refreshPhase: 'idle' });
+        globalThis.location.reload();
+        return;
+      }
+
+      // Nothing was republished and the page already runs the live graph, so
+      // there is no graph to sync. Host plugin code may still have been reloaded,
+      // and that outcome is reported below instead of doing nothing visibly.
+      const current = decision.reason === 'current';
+
+      // A graph from another Host release is refused by the page runtime (it
+      // only applies graphs of its boot release), so syncing it would report a
+      // success that never happened. Say plainly that a restart is needed.
+      if (!current) {
+        const bootRelease = boot && boot.release ? boot.release : null;
+        const liveRelease = value.graph && value.graph.release ? value.graph.release : null;
+        const sameRelease =
+          (bootRelease === null && liveRelease === null) ||
+          (bootRelease !== null &&
+            liveRelease !== null &&
+            bootRelease.version === liveRelease.version &&
+            (bootRelease.commit ?? '') === (liveRelease.commit ?? ''));
+        if (!sameRelease) {
+          finish('refreshed-needs-restart', t('refreshedNeedsRestart'), 'warn');
+          return;
+        }
+      }
+
+      // The live graph is passed in because the in-page runtime cannot fetch it
+      // on its own; syncing it hot-swaps changed fibers without a document load.
+      let synced = current;
+      if (!current) {
+        const modules = optionalService(ctxRef, 'modules');
+        if (modules && modules.entries && typeof modules.entries.sync === 'function' && value.graph) {
+          try {
+            await modules.entries.sync(value.graph);
+            synced = true;
+          } catch {
+            synced = false;
+          }
+        }
+      }
+
+      if (!synced) {
+        finish('refreshed-needs-restart', t('refreshedNeedsRestart'), 'warn');
+        return;
+      }
+
+      // Plugin code that could not reload is still worth reporting even when the
+      // interface itself was republished: the two halves fail independently.
+      if (value.code === 'no-hmr') {
+        finish('refresh-no-hmr', t('refreshNoHmr'), 'warn');
+        return;
+      }
+      if (value.code === 'reload-failed') {
+        finish('refresh-reload-failed', t('refreshReloadFailed'), 'warn');
+        return;
+      }
+      // A restartReason that is only about where a package is mapped does not
+      // stop the page: the files that run now are the ones the next page loads.
+      if (restartReason !== null && !restartOnly) {
+        finish('refreshed-needs-restart', t('refreshedNeedsRestart'), 'warn');
+        return;
+      }
+      if (unhealthy > 0 || warned > 0) {
+        finish('refreshed-partial', t('refreshedPartial').replace('{n}', String(unhealthy + warned)), 'warn');
+        return;
+      }
+      if (changed.length === 0 && applied > 0) {
+        finish('refreshed-plugins', t('refreshedPlugins').replace('{n}', String(applied)), 'ok');
+        return;
+      }
+
+      const text =
+        changed.length > 0
+          ? t('refreshedHot').replace('{n}', String(changed.length))
+          : t('refreshedCurrent');
+      finish(changed.length > 0 ? 'refreshed-hot' : 'refreshed-unchanged', text, 'ok');
+    }
+
+    /**
+     * Heal a page that booted from a stale manifest.
+     *
+     * The desktop shell freezes the Host's boot payload at window start, so a
+     * later document load can run an older bundle graph than the Host serves.
+     * Ask for the live revision once per page load and, when it differs, run the
+     * ordinary refresh (a hot sync, never a reload). Every failure stays silent:
+     * this is a repair, not an action the user asked for.
+     */
+    async function reconcileBootGraph() {
+      const boot = globalThis.__DSH_BOOT__;
+      const bootRev = boot && typeof boot.rev === 'string' ? boot.rev : null;
+      if (!bootRev) return;
+      if (globalThis.__wsmBootReconciled === bootRev) return;
+      globalThis.__wsmBootReconciled = bootRev;
+      let settled;
+      try {
+        settled = settle(await callRemote('clientModule'));
+      } catch {
+        return;
+      }
+      const value = settled.value || settled.refusal || null;
+      if (!value || value.status === 'error' || typeof value.rev !== 'string') return;
+      if (value.rev === bootRev) return;
+      await runRefresh('silent');
     }
 
     /**
@@ -2119,7 +2580,11 @@ function build(require) {
           mountSucceeded = false;
           mountValue = undefined;
           scopedCtx = null;
-          patch({ open: false, phase: 'idle', result: null, error: null });
+          if (noticeTimer !== null) {
+            clearTimeout(noticeTimer);
+            noticeTimer = null;
+          }
+          patch({ open: false, phase: 'idle', result: null, error: null, refreshPhase: 'idle', refreshNotice: null });
           listeners.clear();
         });
 
@@ -2134,6 +2599,15 @@ function build(require) {
         } catch (error) {
           console.error('[dsh-workspace-control] remote wiring failed', error);
         }
+
+        // One boot-time reconcile, after the gateway has had time to connect.
+        // See reconcileBootGraph: a page that booted from a stale Host manifest
+        // would otherwise keep running bundle bytes the Host has replaced.
+        setTimeout(() => {
+          reconcileBootGraph().catch(() => {
+            /* a repair that cannot run is not worth a message */
+          });
+        }, 1200);
 
         // Dictionaries go in through the per-locale form: the namespace is not
         // part of the compile-time merge table, and one locale failing here must
@@ -2202,6 +2676,12 @@ function build(require) {
 
         seat(OVERLAY, { id: 'workspace-control-dialog', order: 40, locale: NS }, Shell);
 
+        // Refresh lives in the conversation header's utilities list: the rightmost
+        // item of that row, immediately beside the corner button DSH fills with
+        // "open sidebar". Order 50 keeps it there without racing other plugins
+        // (open-in-app uses -10, schedule -5).
+        seat(HEADER_UTILITIES, { id: 'workspace-control-refresh', order: 50, locale: NS }, HeaderRefresh);
+
         // The workspace row's own "..." menu has no extension slot (the whole
         // browser region is a single `shadows-shipped-ui` hole), so workspace
         // management gets its own central panel: a sidebar entry plus the panel
@@ -2218,7 +2698,44 @@ function build(require) {
     };
 }
 
-window.__ModuleLoader__.load({
+/**
+ * Register the Client half without throwing out of this script.
+ *
+ * The platform runs every immediate bundle once on its own and again inside the
+ * composed batch, so a second registration is expected. A throw here is fatal
+ * for the whole boot ("web boot: N entries did not activate"), so the duplicate
+ * case is downgraded to a warning and every other failure is logged and drawn
+ * as a banner instead of escaping the script.
+ */
+function registerClientModule(spec) {
+  try {
+    window.__ModuleLoader__.load(spec);
+  } catch (error) {
+    const text = String((error && error.message) || error);
+    if (/duplicate|already|registered/i.test(text)) {
+      console.warn('[dsh-workspace-control] the client half is already on this page; skipping the duplicate registration');
+      return;
+    }
+    console.error('[dsh-workspace-control] the client half could not be registered', error);
+    try {
+      const banner = document.createElement('div');
+      banner.setAttribute('data-workspace-control-error', '');
+      banner.textContent = ['workspace control: registration failed', text.slice(0, 400)].join(
+        String.fromCharCode(10),
+      );
+      banner.style.cssText =
+        'position:fixed;left:12px;bottom:12px;z-index:2147483647;max-width:44ch;' +
+        'padding:10px 12px;border-radius:10px;font:12px/1.45 ui-monospace,monospace;' +
+        'white-space:pre-wrap;color:#ffb4b4;background:rgba(40,16,20,.94);' +
+        'border:1px solid rgba(255,120,120,.45)';
+      (document.body || document.documentElement).appendChild(banner);
+    } catch {
+      /* nothing left to report to */
+    }
+  }
+}
+
+registerClientModule({
   id: 'dsh-workspace-control',
   factory(require) {
     try {
@@ -2247,3 +2764,5 @@ window.__ModuleLoader__.load({
     }
   },
 });
+
+})();
