@@ -97,19 +97,40 @@ test('a failing registration is reported instead of escaping the script', () => 
   document.body.appendChild = original;
 });
 
-test('a refresh paints its own veil and never reloads the page on desktop', () => {
-  // A hot swap replaces fibers in place, so DSH's boot splash cannot appear; the
-  // refresh says what it is doing with its own timed veil (it must not flash for
-  // a fast swap, hence the delayed animation) and it must never navigate.
+test('a refresh really reloads the page once the Host pinned its boot manifest', () => {
+  // A real refresh resets the whole interface (sidebar, panel state, every React
+  // tree), and the only way to do that is a document load. The veil covers the
+  // gap until the new document replaces this one; it must not flash for a fast
+  // swap (delayed animation) and it stays up while the reload happens.
   assert.match(source, /className: 'wsm-loading'/);
   assert.match(source, /refreshPhase !== 'running'\) return null/);
   assert.match(source, /\.wsm-loading\{animation:none;background:rgba\(0,0,0,\.24\)\}/);
   assert.match(source, /refreshSplash/);
-  // Reloading the document is the thing that crashed start-up; the page heals a
-  // stale boot by hot-syncing, guarded so it runs once per boot revision.
+
+  // The desktop shell replays one frozen boot manifest into every document load,
+  // so the page reports that manifest to the Host once per load; the Host keeps
+  // exactly those bundles served and only then is a reload safe.
+  assert.match(source, /async function reportBootPins\(\)/);
+  assert.match(source, /callRemote\('pinBoot', urls\)/);
+  assert.match(source, /__wsmBootPinned/);
+  assert.match(source, /const reloadSafe = reload !== null && reload\.safe === true && reload\.supported === true;/);
+  assert.match(
+    source,
+    /const reloading = !silent && \(decision\.action === 'reload' \|\| \(isDesktop && reloadSafe\)\);/,
+  );
+  assert.match(source, /if \(reloading && typeof globalThis\.location !== 'undefined'/);
+  // Exactly one navigation, behind that guard.
+  assert.equal(source.match(/globalThis\.location\.reload\(\)/g)?.length, 1);
+
+  // The silent boot reconcile must never reload: the new document would replay
+  // the same stale manifest and loop. Only a user click may navigate.
+  assert.match(source, /const silent = source === 'silent';/);
   assert.match(source, /reconcileBootGraph/);
   assert.equal(source.match(/__wsmBootReconciled/g)?.length, 2);
-  assert.match(source, /reloadUnsafe/);
+
+  // A reload that cannot be guaranteed is refused and explained instead.
+  assert.match(source, /reloadSafe === false && !silent/);
+  assert.match(source, /refreshBlocked/);
 });
 
 test('the refresh seat rides in the header utilities row, not a fixed overlay', () => {

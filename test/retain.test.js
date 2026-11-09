@@ -9,7 +9,14 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { bootBundleStatus, retainBootBundles, restoreBootBundles } from '../retain.js';
+import {
+  bootBundleStatus,
+  normalizeBundleUrl,
+  pinBootBundles,
+  pinnedBootStatus,
+  retainBootBundles,
+  restoreBootBundles,
+} from '../retain.js';
 
 const KEY = Symbol.for('dsh-workspace-control.boot-bundles');
 const forget = () => { delete globalThis[KEY]; };
@@ -84,6 +91,68 @@ test('re-installing on a reloaded Host keeps exactly one listener', () => {
   modules.rotate({ '/boot/b.js': 'b' });
   modules.rotate({ '/boot/c.js': 'c' });
   assert.equal(modules.responses.has('/boot/a.js'), true);
+});
+
+test('pinning keeps exactly the URLs the page booted from', () => {
+  forget();
+  const modules = fakeModules({ '/boot/a.js': 'a-v1', '/boot/b.js': 'b-v1' });
+  retainBootBundles(modules);
+  assert.deepEqual(pinBootBundles(modules, ['/boot/a.js', 'boot/b.js']), {
+    supported: true,
+    pinned: 2,
+    missing: 0,
+  });
+  assert.deepEqual(pinnedBootStatus(modules), { supported: true, safe: true, pinned: 2, missing: 0 });
+  // Two rotations: only the pinned pair may be brought back, not the whole table.
+  modules.rotate({ '/boot/c.js': 'c-v1' });
+  modules.rotate({ '/boot/d.js': 'd-v1' });
+  assert.equal(modules.responses.has('/boot/a.js'), true);
+  assert.equal(modules.responses.has('/boot/b.js'), true);
+  assert.equal(modules.responses.has('/boot/c.js'), false);
+});
+
+test('an unknown boot URL is counted, never silently pinned', () => {
+  forget();
+  const modules = fakeModules({ '/boot/a.js': 'a-v1' });
+  retainBootBundles(modules);
+  assert.deepEqual(pinBootBundles(modules, ['/boot/a.js', '/boot/gone.js']), {
+    supported: true,
+    pinned: 2,
+    missing: 1,
+  });
+  assert.deepEqual(pinnedBootStatus(modules), { supported: true, safe: false, pinned: 2, missing: 1 });
+});
+
+test('a pinned URL is restored after a rebuild that dropped it', () => {
+  forget();
+  const modules = fakeModules({ '/boot/a.js': 'a-v1' });
+  pinBootBundles(modules, ['/boot/a.js']);
+  modules.rotate({ '/boot/b.js': 'b-v1' });
+  modules.rotate({ '/boot/c.js': 'c-v1' });
+  assert.equal(modules.responses.get('/boot/a.js'), 'a-v1');
+  assert.deepEqual(pinnedBootStatus(modules), { supported: true, safe: true, pinned: 1, missing: 0 });
+});
+
+test('a newer generation that reuses a pinned URL still wins', () => {
+  forget();
+  const modules = fakeModules({ '/boot/a.js': 'a-v1' });
+  pinBootBundles(modules, ['/boot/a.js']);
+  modules.rotate({ '/boot/a.js': 'a-v2' });
+  assert.equal(modules.responses.get('/boot/a.js'), 'a-v2');
+  assert.equal(restoreBootBundles(modules), 0);
+});
+
+test('boot URLs are normalized to the Host key shape', () => {
+  assert.equal(normalizeBundleUrl('boot/a.js'), '/boot/a.js');
+  assert.equal(normalizeBundleUrl('  /boot/a.js  '), '/boot/a.js');
+  assert.equal(normalizeBundleUrl('dsh-app://app/plugins/a.js?rev=1'), '/plugins/a.js?rev=1');
+  assert.equal(normalizeBundleUrl(''), '');
+});
+
+test('a build that cannot pin reports unsupported instead of guessing', () => {
+  forget();
+  assert.deepEqual(pinBootBundles({}, ['/boot/a.js']), { supported: false, pinned: 0, missing: 0 });
+  assert.deepEqual(pinnedBootStatus({}), { supported: false, safe: false, pinned: 0, missing: 0 });
 });
 
 test('status reports a missing boot URL instead of assuming the listener ran', () => {

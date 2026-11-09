@@ -22,7 +22,7 @@ test('a plain web page always reloads: its index is rendered per request', () =>
   );
 });
 
-test('a republished bundle forbids a reload on the desktop shell', () => {
+test('a republished bundle is hot-synced on the desktop: only the page knows its boot pin', () => {
   assert.deepEqual(
     decideRefreshAction({ isDesktop: true, bootRev: 'a', liveRev: 'a', changed: ['dsh-workspace-control'] }),
     { action: 'sync', reason: 'changed' },
@@ -36,14 +36,14 @@ test('a boot snapshot behind the live graph forbids a reload', () => {
   });
 });
 
-test('a current graph is synced too, because the desktop never reloads', () => {
+test('a current graph is synced too, because the Host alone can never reload', () => {
   assert.deepEqual(decideRefreshAction({ isDesktop: true, bootRev: 'same', liveRev: 'same', changed: [] }), {
     action: 'sync',
     reason: 'current',
   });
 });
 
-test('no desktop state can ever produce a document reload', () => {
+test('no desktop graph state alone produces a document reload', () => {
   const states = [
     { bootRev: 'same', liveRev: 'same', changed: [] },
     { bootRev: 'a', liveRev: 'b', changed: [] },

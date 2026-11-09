@@ -151,7 +151,7 @@ async function mountPanel(workspaces) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   };
 
-  return { component: panel.component, flush, styles };
+  return { component: panel.component, registrations, flush, styles };
 }
 
 const props = { t: (key) => key };
@@ -250,4 +250,34 @@ test('a task opens as a dialog over the list instead of replacing it', async () 
   const closed = component(props);
   assert.equal(byClass(closed, 'wsm-modal').length, 0);
   assert.equal(byClass(closed, 'wsm-card').length, 2);
+});
+
+test('the settings section renders the manager itself, not a launcher', async () => {
+  const { component, registrations, flush, styles } = await mountPanel(ROWS);
+  const section = registrations.find((each) => each.options.name === 'settings.section');
+  assert.ok(section, 'the settings section is registered');
+
+  const tree = section.component({ close() {} });
+  assert.equal(tree.type, component, 'the section mounts the same manager');
+  assert.equal(tree.props.variant, 'section', 'it mounts it in section layout');
+
+  tree.type(tree.props);
+  await flush();
+  const rendered = tree.type(tree.props);
+  assert.equal(byClass(rendered, 'wsm-root--section').length, 1);
+  assert.equal(byClass(rendered, 'wsm-page--section').length, 1);
+  assert.equal(byClass(rendered, 'wsm-card').length, ROWS.length, 'the list is right there');
+
+  // One click on the section shows the page: no launcher button, no second step.
+  const buttons = nodes(rendered).filter((node) => node.type === 'button');
+  assert.ok(buttons.length > 0, 'the manager keeps its own actions');
+  assert.ok(
+    buttons.every((button) => textOf(button) !== '打开工作区管理'),
+    'the launcher that asked for a second click is gone',
+  );
+
+  const css = styles.join('\n');
+  assert.match(css, /\.wsm-root--section\{padding:0/);
+  assert.match(css, /\.wsm-root--section \.wsm-title\{display:none\}/);
+  assert.match(css, /\.wsm-page--section\{padding-left:0/);
 });

@@ -23,7 +23,7 @@
 
 const KEY = Symbol.for('dsh-workspace-control.boot-bundles');
 
-/** @typedef {{ urls: Map<string, unknown>, dispose: null | (() => void), modules: unknown }} Retention */
+/** @typedef {{ urls: Map<string, unknown>, pinned: Map<string, unknown>, dispose: null | (() => void), modules: unknown }} Retention */
 
 const isMap = (value) =>
   value !== null &&
@@ -36,8 +36,11 @@ const isMap = (value) =>
 /** The process-wide snapshot, created on first use. */
 function state() {
   const existing = globalThis[KEY];
-  if (existing && isMap(existing.urls)) return existing;
-  const fresh = { urls: new Map(), dispose: null, modules: null };
+  if (existing && isMap(existing.urls)) {
+    if (!isMap(existing.pinned)) existing.pinned = new Map();
+    return existing;
+  }
+  const fresh = { urls: new Map(), pinned: new Map(), dispose: null, modules: null };
   globalThis[KEY] = fresh;
   return fresh;
 }
@@ -72,8 +75,16 @@ export function retainBootBundles(modules) {
   remember(responses);
   remember(modules.previousBatchResponses);
 
-  // One listener at a time: a reloaded Host half subscribes again, and the
-  // previous subscription belongs to a module instance that no longer exists.
+  subscribe(modules, snapshot);
+
+  return { supported: true, retained: snapshot.urls.size };
+}
+
+/**
+ * One graph listener at a time: a reloaded Host half subscribes again, and the
+ * previous subscription belongs to a module instance that no longer exists.
+ */
+function subscribe(modules, snapshot) {
   if (typeof snapshot.dispose === 'function') {
     try { snapshot.dispose(); } catch { /* the old owner is gone */ }
     snapshot.dispose = null;
@@ -86,8 +97,71 @@ export function retainBootBundles(modules) {
       snapshot.dispose = null;
     }
   }
+}
 
-  return { supported: true, retained: snapshot.urls.size };
+/**
+ * Turn a boot-manifest URL into the key the registry serves from.
+ *
+ * Boot rows are document-relative ("plugins/x.js"), while the registry keys its
+ * maps by pathname + search with a leading slash; an absolute URL is reduced to
+ * the same key.
+ */
+export function normalizeBundleUrl(value) {
+  if (typeof value !== 'string') return '';
+  const text = value.trim();
+  if (text === '') return '';
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(text)) {
+    try {
+      const parsed = new URL(text);
+      return (parsed.pathname + parsed.search) || '';
+    } catch {
+      return '';
+    }
+  }
+  return text.startsWith('/') ? text : '/' + text;
+}
+
+/**
+ * Pin exactly the bundles the current page booted from.
+ *
+ * The shell freezes its boot injections for the lifetime of the window, so a
+ * document reload replays that one manifest. Pinning its URLs keeps those very
+ * responses resolvable no matter how many rebuilds replaced the tables
+ * afterwards. URLs the registry still serves are picked up as-is.
+ *
+ * @returns {{ supported: boolean, pinned: number, missing: number }}
+ */
+export function pinBootBundles(modules, urls) {
+  const responses = responsesOf(modules);
+  if (responses === null) return { supported: false, pinned: 0, missing: 0 };
+
+  const snapshot = state();
+  snapshot.modules = modules;
+  const sources = [responses, snapshot.urls, modules.previousBatchResponses];
+  for (const raw of Array.isArray(urls) ? urls : []) {
+    const url = normalizeBundleUrl(raw);
+    if (url === '') continue;
+    // A URL the registry does not serve yet is remembered as unresolved: it keeps
+    // the reload unsafe (the page would ask for it again) and a later table that
+    // does carry it can still fill it in.
+    if (snapshot.pinned.get(url)) continue;
+    let response = null;
+    for (const map of sources) {
+      if (!isMap(map) || !map.has(url)) continue;
+      const candidate = map.get(url);
+      if (candidate !== null && candidate !== undefined) {
+        response = candidate;
+        break;
+      }
+    }
+    snapshot.pinned.set(url, response);
+  }
+
+  let missing = 0;
+  for (const response of snapshot.pinned.values()) if (!response) missing += 1;
+
+  subscribe(modules, snapshot);
+  return { supported: true, pinned: snapshot.pinned.size, missing };
 }
 
 /**
@@ -104,12 +178,40 @@ export function restoreBootBundles(modules = null) {
   const responses = responsesOf(modules ?? existing.modules);
   if (responses === null) return 0;
   let restored = 0;
-  for (const [url, response] of existing.urls) {
-    if (responses.has(url)) continue;
-    responses.set(url, response);
-    restored += 1;
+  const tables = [existing.pinned, existing.urls];
+  for (const table of tables) {
+    if (!isMap(table)) continue;
+    for (const [url, response] of table) {
+      if (!response || responses.has(url)) continue;
+      responses.set(url, response);
+      restored += 1;
+    }
   }
   return restored;
+}
+
+/**
+ * Whether a document load can still resolve the *pinned* boot manifest.
+ *
+ * This is the precise answer once the Client half has reported its boot URLs:
+ * exactly those URLs decide whether a reload is safe. Without any pinned URL
+ * (an older Client half) the caller falls back to `bootBundleStatus`.
+ *
+ * @returns {{ supported: boolean, safe: boolean, pinned: number, missing: number }}
+ */
+export function pinnedBootStatus(modules) {
+  const existing = globalThis[KEY];
+  const pinned = existing && isMap(existing.pinned) ? existing.pinned : null;
+  const count = pinned === null ? 0 : pinned.size;
+  const responses = responsesOf(modules ?? (existing ? existing.modules : null));
+  if (pinned === null || count === 0 || responses === null) {
+    return { supported: false, safe: false, pinned: count, missing: count };
+  }
+  let missing = 0;
+  for (const [url, response] of pinned) {
+    if (!response || !responses.has(url)) missing += 1;
+  }
+  return { supported: true, safe: missing === 0, pinned: count, missing };
 }
 
 /**

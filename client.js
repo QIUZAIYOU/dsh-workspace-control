@@ -73,6 +73,12 @@ function build(require) {
       if (typeof value !== 'boolean') throw new Error('Expected a boolean');
       return value;
     });
+    const bootUrlListCodec = codec('BootUrlList', (value) => {
+      if (!Array.isArray(value)) throw new Error('Expected an array of bundle urls');
+      return value
+        .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+        .filter((entry) => entry !== '');
+    });
     const workspaceIdsCodec = codec('WorkspaceIdList', (value) => {
       if (!Array.isArray(value) || value.length === 0) {
         throw new Error('Expected a non-empty array of workspace ids');
@@ -103,6 +109,7 @@ function build(require) {
     }
 
     const DESCRIPTORS = Object.freeze([
+
       method('inspect', [{ wire: 'sessionId', codec: sessionIdCodec }]),
       method('move', [
         { wire: 'sessionId', codec: sessionIdCodec },
@@ -125,15 +132,14 @@ function build(require) {
         { wire: 'workspaceId', codec: workspaceIdCodec },
         { wire: 'keepSessions', codec: booleanCodec },
       ]),
-      // Diagnostics the panel never calls but the contract test (and any console
-      // debugging) needs mounted, so Client and Host stay one list.
       method('probeAgent', [{ wire: 'sessionId', codec: sessionIdCodec }]),
       method('releaseSession', [{ wire: 'sessionId', codec: sessionIdCodec }]),
       method('probeRestart', []),
       method('clientModule', []),
+      method('pinBoot', [{ wire: 'urls', codec: bootUrlListCodec }]),
       method('refresh', []),
       method('restart', [{ wire: 'force', codec: booleanCodec }]),
-    ]);
+]);
 
     const REMOTE = Object.freeze({ package: PACKAGE, descriptors: DESCRIPTORS });
 
@@ -200,8 +206,8 @@ function build(require) {
       back: { zh: '返回', en: 'Back' },
       refreshDsh: { zh: '刷新界面', en: 'Refresh UI' },
       refreshHint: {
-        zh: '重新发布插件改动，不重启 DSH；正在生成的那一轮不会被中断。',
-        en: 'Republish plugin changes without restarting DSH; a turn in progress is not interrupted.',
+        zh: '重新发布插件改动并重载页面，界面状态会重置；正在生成的那一轮不会被中断。',
+        en: 'Republish plugin changes and reload the page; interface state resets. A turn in progress is not interrupted.',
       },
       refreshing: { zh: '正在刷新…', en: 'Refreshing…' },
       refreshedHot: {
@@ -212,10 +218,10 @@ function build(require) {
         zh: '没有插件改动，界面已是最新。',
         en: 'No plugin changed; the interface is already current.',
       },
-      refreshSplash: { zh: '正在刷新界面…', en: 'Refreshing the interface…' },
-      reloadUnsafe: {
-        zh: '另外：直接重载页面可能打不开 DSH，请只用本插件的刷新。',
-        en: 'Also: reloading the page itself may fail to start DSH; use the refresh button in this plugin.',
+      refreshSplash: { zh: '正在刷新页面…', en: 'Refreshing the page…' },
+      refreshBlocked: {
+        zh: '这次没有重载页面：Host 还不能保证旧页面重载后可以正常启动，已改为热同步。重启一次 DSH 之后再刷新就会真正重载。',
+        en: 'The page was not reloaded: the Host cannot guarantee the old manifest still boots, so it hot-synced instead. After one DSH restart, refresh will really reload.',
       },
       refreshedNeedsRestart: {
         zh: '热更新没有生效：这个页面和当前的 Host 不是同一版本。插件改动需要重启 DSH 才会完整生效。',
@@ -424,12 +430,6 @@ function build(require) {
       doRename: { zh: '保存', en: 'Save' },
       renaming: { zh: '正在保存…', en: 'Saving…' },
       needTitle: { zh: '名称不能为空。', en: 'The name cannot be empty.' },
-      settingsTitle: { zh: '工作区管理', en: 'Workspaces' },
-      settingsHint: {
-        zh: '集中管理工作区：重建到新目录、合并、重命名、删除。占用状态会在操作前就标出来。',
-        en: 'Rebuild to a new directory, merge, rename or delete workspaces. Session occupancy is shown before you act.',
-      },
-      openPanel: { zh: '打开工作区管理', en: 'Open workspaces' },
       remove: { zh: '删除', en: 'Delete' },
       removeTitle: { zh: '删除工作区', en: 'Delete workspace' },
       removeHint: {
@@ -1329,6 +1329,10 @@ function build(require) {
       .wsm-page{display:flex;flex-direction:column;gap:14px;min-width:0;
         padding-left:max(max(16px,min(4vw,48px)),50% - 480px);
         padding-right:max(max(16px,min(4vw,48px)),50% - 480px)}
+      /* Settings: the dialog owns both the frame and the scroller. */
+      .wsm-root--section{padding:0;height:auto;overflow:visible}
+      .wsm-root--section .wsm-title{display:none}
+      .wsm-page--section{padding-left:0;padding-right:0;max-width:none}
       .wsm-root :focus-visible{outline:2px solid var(--dsw-focus-ring-color,rgba(88,101,242,.65));outline-offset:2px}
       .wsm-headActions{display:flex;align-items:center;gap:8px}
       .wsm-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
@@ -1549,6 +1553,9 @@ function build(require) {
 
     function WorkspacePanel(props) {
       const state = useStore();
+      // Settings mounts the manager with variant 'section': the dialog already
+      // owns the page frame and the scroller, so the panel drops its own.
+      const section = Boolean(props && props.variant === 'section');
       const busy = state.phase === 'moving';
       const live = liveRunReader(props);
       const list = Array.isArray(state.workspaces)
@@ -1977,8 +1984,14 @@ function build(require) {
 
       return h(
         'div',
-        { className: 'wsm-root' },
-        h('div', { className: 'wsm-page' }, head, ...notes, listBody),
+        { className: section ? 'wsm-root wsm-root--section' : 'wsm-root' },
+        h(
+          'div',
+          { className: section ? 'wsm-page wsm-page--section' : 'wsm-page' },
+          head,
+          ...notes,
+          listBody,
+        ),
         modal,
       );
     }
@@ -2009,60 +2022,15 @@ function build(require) {
     }
 
     /**
-     * The same manager, reachable from Settings.
+     * Settings renders the manager itself.
      *
-     * `settings.section` renders inside the settings panel, whose owner hands a
-     * section only `close()`. The panel itself is dispatched through the layout
-     * service, so this entry is a launcher with the occupancy summary in front
-     * of it rather than a second copy of the manager.
+     * `settings.section` mounts inside the settings dialog, which already owns
+     * the page frame and the scroller. The manager therefore drops its own frame
+     * (`variant: 'section'`): one click on the section already shows the page,
+     * instead of making the reader press a second button for the same manager.
      */
-    function SettingsEntry(props) {
-      const state = useStore();
-      const close = props && typeof props.close === 'function' ? props.close : null;
-      React.useEffect(() => {
-        if (!Array.isArray(store.workspaces)) loadWorkspaces().catch(() => {});
-      }, []);
-      const list = Array.isArray(state.workspaces) ? state.workspaces : null;
-      const count =
-        list === null ? '' : String(pick(TEXT.settingsCount) || '').replace('{n}', String(list.length));
-      const open = () => {
-        const layout = optionalService(ctxRef, 'layout');
-        try {
-          if (layout && typeof layout.selectPanel === 'function') layout.selectPanel(PANEL_KEY);
-        } catch (error) {
-          console.error('[dsh-workspace-control] selectPanel failed', error);
-        }
-        if (close) close();
-      };
-      return h(
-        'div',
-        { style: { display: 'grid', gap: 10, maxWidth: 560 } },
-        h('div', { key: 'title', style: { fontSize: 16, fontWeight: 600 } }, t('settingsTitle')),
-        h('div', { key: 'hint', style: { fontSize: 13, lineHeight: 1.55, opacity: 0.75 } }, t('settingsHint')),
-        count
-          ? h('div', { key: 'count', style: { fontSize: 12, opacity: 0.6 } }, count)
-          : null,
-        h(
-          'button',
-          {
-            key: 'open',
-            type: 'button',
-            onClick: open,
-            style: {
-              justifySelf: 'start',
-              padding: '7px 14px',
-              borderRadius: 8,
-              border: '0.5px solid var(--dsw-alias-border-l2, rgba(127,127,127,0.22))',
-              background: 'var(--dsw-alias-bg-l2, rgba(127,127,127,0.10))',
-              color: 'inherit',
-              font: 'inherit',
-              fontSize: 13,
-              cursor: 'pointer',
-            },
-          },
-          t('openPanel'),
-        ),
-      );
+    function SettingsEntry() {
+      return h(WorkspacePanel, { variant: 'section' });
     }
 
     /** The round-arrow glyph for the header refresh seat. */
@@ -2276,9 +2244,11 @@ function build(require) {
     }
 
     /**
-     * Republish plugin bundles, then rebuild the interface by the one route that
-     * is safe on this page: a desktop shell hot-syncs the client graph in place
-     * (never reloading), while plain web may reload when its boot graph is current.
+     * Republish plugin bundles, then rebuild the interface for real: reload the
+     * document whenever the Host still serves the exact boot bundles this page
+     * started from. On the desktop shell that is only guaranteed after the page
+     * reported its manifest (pinBoot); until then the click hot-syncs in place
+     * instead of risking a boot that cannot start.
      */
     async function runRefresh(source) {
       if (store.refreshPhase === 'running') return;
@@ -2335,7 +2305,6 @@ function build(require) {
       // 404 mid-boot; when it could not, say so: another plugin's reload button
       // (or F5) is then the thing that breaks startup.
       const reload = value.reload && typeof value.reload === 'object' ? value.reload : null;
-      if (reload !== null && reload.safe === false) extra = t('reloadUnsafe');
       // The Host half reloads plugin code before republishing bundles. Its report
       // is three-way on purpose: plugins can reload while the page sync fails, or
       // the interface can refresh while the plugin set still needs a restart.
@@ -2356,10 +2325,22 @@ function build(require) {
         typeof globalThis.dshDesktopBoot !== 'undefined';
 
       const decision = decideRefresh({ isDesktop, bootRev, liveRev, changed });
-      if (decision.action === 'reload') {
-        patch({ refreshPhase: 'idle' });
+      // A real refresh: reload the document whenever the Host guarantees the
+      // frozen boot manifest still resolves. The veil stays up until the new
+      // document replaces this one. The silent boot reconcile must never reload
+      // (the reloaded page would boot the same stale manifest again).
+      // `supported` is the newer Host's promise that it pinned this page's exact
+      // manifest; without it (an older Host) a reload could still 404 mid-boot.
+      const reloadSafe = reload !== null && reload.safe === true && reload.supported === true;
+      const silent = source === 'silent';
+      const reloading = !silent && (decision.action === 'reload' || (isDesktop && reloadSafe));
+      if (reloading && typeof globalThis.location !== 'undefined' && typeof globalThis.location.reload === 'function') {
         globalThis.location.reload();
         return;
+      }
+      if (!reloading && isDesktop && reloadSafe === false && !silent) {
+        // Explain why this click fell back to a hot sync instead of reloading.
+        extra = [extra, t('refreshBlocked')].filter((part) => part !== '').join(' ');
       }
 
       // Nothing was republished and the page already runs the live graph, so
@@ -2435,6 +2416,36 @@ function build(require) {
           ? t('refreshedHot').replace('{n}', String(changed.length))
           : t('refreshedCurrent');
       finish(changed.length > 0 ? 'refreshed-hot' : 'refreshed-unchanged', text, 'ok');
+    }
+
+    /**
+     * Tell the Host which bundle URLs this document actually booted from.
+     *
+     * The desktop shell replays its frozen boot manifest into every later
+     * document load, so a reload is only safe while exactly those URLs stay
+     * resolvable on the Host. Reported once per page load.
+     */
+    async function reportBootPins() {
+      if (globalThis.__wsmBootPinned) return;
+      const boot = globalThis.__DSH_BOOT__;
+      if (!boot || typeof boot !== 'object') return;
+      const urls = [];
+      const collect = (rows) => {
+        if (!Array.isArray(rows)) return;
+        for (const row of rows) {
+          if (row && typeof row.url === 'string' && row.url !== '') urls.push(row.url);
+        }
+      };
+      collect(boot.entries);
+      collect(boot.batches);
+      if (urls.length === 0) return;
+      try {
+        const settled = settle(await callRemote('pinBoot', urls));
+        if (settled.error || !settled.value || settled.value.status === 'error') return;
+        globalThis.__wsmBootPinned = true;
+      } catch {
+        /* the next page load reports again */
+      }
     }
 
     /**
@@ -2600,10 +2611,20 @@ function build(require) {
           console.error('[dsh-workspace-control] remote wiring failed', error);
         }
 
+        // Tell the Host which manifest this page booted from, so it can keep
+        // those exact bundles resolvable for a real reload. Retried once because
+        // the gateway may still be connecting during the first paint.
+        setTimeout(() => {
+          reportBootPins().catch(() => {
+            /* the next page load reports again */
+          });
+        }, 300);
+
         // One boot-time reconcile, after the gateway has had time to connect.
         // See reconcileBootGraph: a page that booted from a stale Host manifest
         // would otherwise keep running bundle bytes the Host has replaced.
         setTimeout(() => {
+          reportBootPins().catch(() => {});
           reconcileBootGraph().catch(() => {
             /* a repair that cannot run is not worth a message */
           });

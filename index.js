@@ -22,7 +22,12 @@
 
 import { helperScript, launcherScript, powerShellLauncherCommand } from './restart.js';
 import { refreshWithHmr } from './refresh.js';
-import { bootBundleStatus, retainBootBundles } from './retain.js';
+import {
+  bootBundleStatus,
+  pinBootBundles,
+  pinnedBootStatus,
+  retainBootBundles,
+} from './retain.js';
 
 import {
   access,
@@ -184,6 +189,12 @@ const booleanCodec = codec('Flag', (value) => {
   if (typeof value !== 'boolean') throw new Error('Expected a boolean');
   return value;
 });
+const bootUrlListCodec = codec('BootUrlList', (value) => {
+  if (!Array.isArray(value)) throw new Error('Expected an array of bundle urls');
+  return value
+    .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+    .filter((entry) => entry !== '');
+});
 const workspaceIdsCodec = codec('WorkspaceIdList', (value) => {
   if (!Array.isArray(value) || value.length === 0) {
     throw new Error('Expected a non-empty array of workspace ids');
@@ -243,6 +254,7 @@ export const DESCRIPTORS = Object.freeze([
   method('releaseSession', [{ wire: 'sessionId', codec: sessionIdCodec }]),
   method('probeRestart', []),
   method('clientModule', []),
+  method('pinBoot', [{ wire: 'urls', codec: bootUrlListCodec }]),
   method('refresh', []),
   method('restart', [{ wire: 'force', codec: booleanCodec }]),
 ]);
@@ -933,10 +945,34 @@ class WorkspaceControl {
       mode: selected,
     });
     // Whether a document load can still resolve the frozen boot manifest. The
-    // page decides from this whether reloading is safe (see retain.js).
-    value.reload = bootBundleStatus(modules);
+    // page decides from this whether reloading is safe (see retain.js). Once the
+    // Client half has pinned the manifest it actually booted from, that exact set
+    // is the answer; an older Client half falls back to the whole snapshot.
+    const pinned = pinnedBootStatus(modules);
+    value.reload = pinned.pinned > 0 ? pinned : bootBundleStatus(modules);
     // The graph is a live Host object; the seam serializes across processes.
     return JSON.parse(JSON.stringify(value));
+  }
+
+  /**
+   * Remember the bundle URLs of the manifest the page actually booted from.
+   *
+   * The desktop shell replays one frozen boot manifest into every document load,
+   * so a real refresh is only safe while exactly those URLs stay resolvable on
+   * the Host. The Client half reports them once per page (see client.js).
+   *
+   * @param {string[]} urls bundle urls from `window.__DSH_BOOT__`
+   */
+  async pinBoot(urls) {
+    const guard = this.#guard();
+    if (guard) return guard;
+    const modules = field(this.#ctx.get?.('clientModules'), 'graph') !== undefined
+      ? this.#ctx.get('clientModules')
+      : null;
+    if (modules === null) return { status: 'ok', supported: false, pinned: 0, missing: 0 };
+    const result = pinBootBundles(modules, Array.isArray(urls) ? urls : []);
+    debug('pin-boot', result);
+    return JSON.parse(JSON.stringify({ status: 'ok', ...result }));
   }
 
   /** Read-only: whether this process can restart the app, and what it would do. */
