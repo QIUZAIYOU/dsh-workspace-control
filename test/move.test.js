@@ -8,7 +8,7 @@
 
 import './env.js';
 import assert from 'node:assert/strict';
-import { mkdir, readdir, rm } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, stat as fsStat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test, { afterEach, beforeEach } from 'node:test';
 
@@ -76,6 +76,27 @@ async function artifacts() {
     }
   }
   return found;
+}
+
+/** Directory entries under every project bucket of the temporary session root. */
+async function storeNames() {
+  const root = join(harness.home, 'sessions');
+  const names = [];
+  for (const bucket of await readdir(root, { withFileTypes: true })) {
+    if (!bucket.isDirectory()) continue;
+    for (const entry of await readdir(join(root, bucket.name))) names.push(entry);
+  }
+  return names;
+}
+
+/** Whether a path exists, without caring why it might not. */
+async function exists(path) {
+  try {
+    await fsStat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 test('a clean move republishes the events under the target directory', async () => {
@@ -195,4 +216,80 @@ test('a second concurrent move of the same session is refused', async () => {
   const [first, second] = await Promise.all([service.move(SESSION, target), service.move(SESSION, target)]);
   const codes = [first.code, second.code].sort();
   assert.deepEqual(codes, ['busy', 'moved']);
+});
+
+/* The parking and membership regressions: DSH 0.2.2 derives a session's
+   identity from its stored path and filters workspace membership through a
+   path index. A copy parked inside the store fails the whole listing, and an
+   id the index does not account for is pruned on every write. */
+
+test('a move never parks a copy inside the session store', async () => {
+  const { service, target } = await setup();
+  assert.equal((await service.move(SESSION, target)).code, 'moved');
+  const parked = (await storeNames()).filter((name) => name.includes('.workspace-control-parked-'));
+  assert.deepEqual(parked, [], 'the copy must live outside the store');
+});
+
+test('a rolled-back move leaves no parked copy inside the session store', async () => {
+  const { service, target } = await setup({ faults: { createThrows: true } });
+  assert.equal((await service.move(SESSION, target)).code, 'write-failed');
+  const parked = (await storeNames()).filter((name) => name.includes('.workspace-control-parked-'));
+  assert.deepEqual(parked, []);
+});
+
+test('a legacy parked copy is moved out of the store, not read as a session', async () => {
+  const { persistence, service } = await setup({ faults: { poisonedByParked: true } });
+  const root = join(harness.home, 'sessions');
+  const bucket = (await readdir(root))[0];
+  const canonical = join(root, bucket, SESSION);
+  const leftover = canonical + '.workspace-control-parked-test';
+  await mkdir(leftover, { recursive: true });
+  await writeFile(join(leftover, 'session.v9.jsonl'), '{"type":"session"}', 'utf8');
+
+  await assert.rejects(() => persistence.list(), /corrupt session log/);
+
+  const recovered = await service.sweepParked();
+  assert.deepEqual(recovered.map((entry) => entry.action), ['discarded']);
+  assert.equal(await exists(leftover), false, 'the stray copy no longer sits in the store');
+  assert.equal((await persistence.list()).length, 1, 'the store lists normally again');
+});
+
+test('a legacy parked copy is restored when it is the only copy', async () => {
+  const { persistence, service } = await setup({ faults: { poisonedByParked: true } });
+  const root = join(harness.home, 'sessions');
+  const bucket = (await readdir(root))[0];
+  const canonical = join(root, bucket, SESSION);
+  const leftover = canonical + '.workspace-control-parked-test';
+  await rename(canonical, leftover);
+  assert.equal(await persistence.present(SESSION), false);
+
+  const recovered = await service.sweepParked();
+  assert.deepEqual(recovered.map((entry) => entry.action), ['restored']);
+  assert.equal(await persistence.present(SESSION), true);
+});
+
+test('a rollback keeps the session listed in the workspace it returns to', async () => {
+  const { registry, service, origin, target } = await setup();
+  assert.equal((await service.move(SESSION, target)).code, 'moved');
+  const back = await service.move(SESSION, origin);
+  assert.equal(back.code, 'moved');
+  const workspace = await registry.resolveByPath(origin);
+  assert.ok(workspace.sessionIds.includes(SESSION), 'membership survives the rollback');
+});
+
+test('a pending attach settles a membership the path index had pruned', async () => {
+  const { registry, service, origin } = await setup();
+  registry.sessionPaths.set(SESSION, 'D:\\elsewhere');
+  const pendingPath = process.env.WSC_PENDING_PATH;
+  await writeFile(
+    pendingPath,
+    JSON.stringify([{ sessionId: SESSION, target: origin, at: new Date().toISOString() }]),
+    'utf8',
+  );
+
+  const outcomes = await service.resumePending();
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].attached, true);
+  assert.ok((await registry.resolveByPath(origin)).sessionIds.includes(SESSION));
+  assert.equal(await exists(pendingPath), false, 'the settled membership leaves the queue');
 });

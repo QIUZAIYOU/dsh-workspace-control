@@ -33,6 +33,7 @@ import {
   access,
   appendFile,
   constants,
+  mkdir,
   readFile,
   readdir,
   rename,
@@ -61,9 +62,15 @@ const PENDING_PATH =
 const LOG_LIMIT_BYTES = 512 * 1024;
 const LOG_CHECK_EVERY = 200;
 
-/** Suffix of a parked session directory. It is not part of the store layout, so
- * a leftover copy is inert and a failed publish can always be renamed back. */
+/** Marker inside the name of a parked session directory. The copy lives outside
+ * the session root: the JSONL backend validates every artifact's path against
+ * its header (id + cwd), so a renamed directory *inside* the store reads as a
+ * corrupt log, and one of those fails the whole listing. */
 const PARK_MARK = '.workspace-control-parked-';
+
+/** Sibling directory of a session root that holds copies an interrupted move
+ * left behind. Same volume as the root, so parking stays one atomic rename. */
+const PARK_DIR_NAME = '.workspace-control-parked';
 
 /** Delay before the membership self-heal runs: the registry has rebuilt its
  * canonical-cwd index by then, which is what refused the attach last run. */
@@ -341,6 +348,25 @@ async function locateArtifact(persistence, id) {
     }
   }
   return null;
+}
+
+/**
+ * Where a move parks one session directory: beside the store, never inside it.
+ * The path is derived from the artifact layout (`<root>/<bucket>/<id>/<log>`),
+ * so the copy stays on the root's volume and `rename` stays atomic while the
+ * backend's path-identity scan cannot see it.
+ */
+function parkPlan(artifact) {
+  const sessionDirectory = dirname(artifact);
+  const bucket = basename(dirname(sessionDirectory));
+  const root = dirname(dirname(sessionDirectory));
+  const parked = join(
+    dirname(root),
+    PARK_DIR_NAME,
+    bucket,
+    `${basename(sessionDirectory)}${PARK_MARK}${randomTag()}`,
+  );
+  return { root, bucket, sessionDirectory, parked };
 }
 
 /** Drop one directory tree and, when it empties, its project directory too. */
@@ -1794,11 +1820,13 @@ class WorkspaceControl {
   /**
    * Make the target directory a workspace and list the session in it.
    *
-   * Membership is *verified* rather than assumed: `attachSession` is judged
-   * against the canonical-cwd index, which is built at startup, so a session
-   * whose header was rewritten during this run may be rejected until the
-   * harness restarts. A silent rejection here is what leaves a workspace that
-   * exists but lists nothing, so the caller must see `attached: false`.
+   * Membership is *verified* rather than assumed. DSH 0.2.2 filters
+   * `workspace.sessionIds` through its path index and prunes an id the index
+   * does not account for, so a stored id that reads back as absent means the
+   * attach did not stick. When that happens the session is detached and
+   * attached once more, which forces the validating path that records the new
+   * cwd. A silent rejection here leaves a workspace that exists but lists
+   * nothing, so the caller must see `attached: false`.
    */
   async #settleRegistry(sessionId, target) {
     const registry = this.#ctx.workspaceRegistry;
@@ -1814,17 +1842,18 @@ class WorkspaceControl {
       const forgotten = this.#forgetIndexedHeader(sessionId);
       debug('registry-index-forgotten', { sessionId, cleared: forgotten });
       await workspace.attachSession(sessionId);
+      // Attaching an id the record already lists skips validation, so the new
+      // cwd never reaches the path index and the registry prunes the id on the
+      // write. Detach first so the second attach takes the validating path.
+      if (!(await this.#listedIn(registry, workspace.id, sessionId))) {
+        await workspace.detachSession(sessionId);
+        await workspace.attachSession(sessionId);
+      }
     } catch (cause) {
       error = describe(cause);
     }
 
-    let attached = false;
-    try {
-      const fresh = workspace ? await registry.get(workspace.id) : null;
-      attached = Boolean(fresh && Array.isArray(fresh.sessionIds) && fresh.sessionIds.includes(sessionId));
-    } catch {
-      attached = false;
-    }
+    const attached = await this.#listedIn(registry, workspace?.id, sessionId);
     const detached = attached && workspace ? await this.#detachEverywhereElse(sessionId, workspace) : [];
     debug('registry-settled', { sessionId, target, created, attached, detached, error });
     if (attached) await this.#clearPending(sessionId);
@@ -1832,50 +1861,46 @@ class WorkspaceControl {
     return { workspace, created, error, attached, detached };
   }
 
+  /** Whether the workspace's visible membership lists this session right now. */
+  async #listedIn(registry, workspaceId, sessionId) {
+    if (!workspaceId) return false;
+    try {
+      const fresh = await registry.get(workspaceId);
+      return Boolean(fresh && Array.isArray(fresh.sessionIds) && fresh.sessionIds.includes(sessionId));
+    } catch {
+      return false;
+    }
+  }
+
   /**
-   * Drop the registry's cached canonical-cwd view of one Session.
+   * Drop the registry's cached header for one Session.
    *
-   * `WorkspaceRegistry` builds its header index once, inside `[Service.init]`,
-   * and `attachSession` validates against it: `readSessionHeader` prefers a
-   * live Session, then its cached header, and only re-reads the store when
-   * neither exists. After this plugin publishes a successor artifact the index
-   * still holds the previous `cwd`, so the attach is refused with
-   * "its cwd resolves to '<old directory>'" even though the store is correct.
+   * `readSessionHeader` prefers a live Session, then this cache, and only
+   * re-reads the store when neither exists. After the plugin publishes a
+   * successor the cache still holds the previous `cwd`, so dropping the entry
+   * makes the next attach validate against the artifact on disk.
    *
-   * The index fields are plain `Map`s on the service instance, so removing one
-   * entry makes the next validation re-read that session's header from the
-   * store — the state a restart would produce — without touching a committed
-   * byte and without rebuilding the whole index.
+   * Only the header cache is touched. DSH 0.2.2 filters workspace membership
+   * through `sessionPaths` and its write path prunes any id that map does not
+   * account for; deleting that entry is what used to turn a rollback into a
+   * workspace that lists nothing. The map stays, and `#settleRegistry` refreshes
+   * it through the public attach path.
    *
-   * Those fields are private. `#internals()` reports whether they are still
-   * shaped the way this expects; when they are not, the attach is attempted
-   * anyway and the caller learns about the refusal through `attached: false`.
+   * The cache is private. `#internals()` reports whether it is still shaped the
+   * way this expects; when it is not, the attach is attempted anyway and the
+   * caller learns about the refusal through `attached: false`.
    */
   #forgetIndexedHeader(sessionId) {
-    const registry = this.#ctx.workspaceRegistry;
-    if (!registry) return false;
-    const keys = ['headers', 'sessionPaths'];
-    let cleared = false;
-    for (const key of keys) {
-      const map = registry[key];
-      if (!map || typeof map.has !== 'function' || typeof map.delete !== 'function') continue;
-      if (!map.has(sessionId)) continue;
-      try {
-        map.delete(sessionId);
-        cleared = true;
-      } catch (error) {
-        debug('registry-index-delete-failed', { key, error: describe(error) });
-      }
+    const map = this.#ctx.workspaceRegistry?.['headers'];
+    if (!map || typeof map.has !== 'function' || typeof map.delete !== 'function') return false;
+    if (!map.has(sessionId)) return false;
+    try {
+      map.delete(sessionId);
+      return true;
+    } catch (error) {
+      debug('registry-index-delete-failed', { key: 'headers', error: describe(error) });
+      return false;
     }
-    const missing = registry.missingSessionPaths;
-    if (missing && typeof missing.delete === 'function') {
-      try {
-        if (missing.delete(sessionId)) cleared = true;
-      } catch {
-        /* best effort */
-      }
-    }
-    return cleared;
   }
 
   /** Remove a settled session from every other workspace's durable list. */
@@ -1931,66 +1956,84 @@ class WorkspaceControl {
     await writePending(list.filter((entry) => entry.sessionId !== sessionId));
   }
 
-  /** Finish the memberships a previous run could not settle.
-   *
-   * `attachSession` validates the stored header against the canonical-cwd index
-   * that the registry builds at startup, so a session whose header was rewritten
-   * during the previous run is refused then and accepted now. Nothing else is
-   * touched: the artifacts already live in the target directory. */
   /**
-   * Recover what an interrupted move left parked: a `.workspace-control-parked-`
-   * copy is an orphan once its successor exists, and the only copy of the
-   * session when it does not. Both cases are decided by the store, not guessed.
+   * Recover what an interrupted move left parked.
+   *
+   * The copy lives outside the session root now, but older versions parked it
+   * beside the original directory, inside the store, where the backend's
+   * path-identity check reads it as a corrupt log and fails the whole listing.
+   * A legacy copy is therefore moved out of the store first and only then
+   * discarded; anything whose canonical artifact is missing is the only copy of
+   * the session and is renamed back instead. The decision comes from the
+   * filesystem, never from the store index the copy itself can break.
    */
   async sweepParked() {
     const recovered = [];
 
     for (const root of await sessionRoots()) {
+      const parkRoot = join(dirname(root), PARK_DIR_NAME);
+
+      // Legacy layout: inside the store, beside the original directory.
       let buckets;
       try {
         buckets = await readdir(root, { withFileTypes: true });
       } catch {
-        continue;
+        buckets = [];
       }
-
       for (const bucket of buckets) {
         if (!bucket.isDirectory()) continue;
         const bucketPath = join(root, bucket.name);
-
         let entries;
         try {
           entries = await readdir(bucketPath, { withFileTypes: true });
         } catch {
           continue;
         }
-
         for (const entry of entries) {
           if (!entry.isDirectory()) continue;
           const marker = entry.name.indexOf(PARK_MARK);
           if (marker <= 0) continue;
-
           const sessionId = entry.name.slice(0, marker);
-          const parked = join(bucketPath, entry.name);
-          const original = join(bucketPath, sessionId);
+          await this.#settleParkedCopy({
+            sessionId,
+            parked: join(bucketPath, entry.name),
+            original: join(bucketPath, sessionId),
+            external: join(parkRoot, bucket.name, entry.name),
+            legacy: true,
+            recovered,
+          });
+        }
+      }
 
-          let successor = false;
-          try {
-            successor = (await this.#ctx.sessionPersistence.stat(sessionId)) !== undefined;
-          } catch {
-            successor = false;
-          }
-
-          try {
-            if (successor) {
-              await rm(parked, { recursive: true, force: true });
-              recovered.push({ sessionId, action: 'discarded' });
-            } else if (!(await this.#dirExists(original))) {
-              await rename(parked, original);
-              recovered.push({ sessionId, action: 'restored' });
-            }
-          } catch (error) {
-            recovered.push({ sessionId, action: 'failed', error: describe(error) });
-          }
+      // Current layout: outside the store, one bucket per project directory.
+      let parkedBuckets;
+      try {
+        parkedBuckets = await readdir(parkRoot, { withFileTypes: true });
+      } catch {
+        parkedBuckets = [];
+      }
+      for (const bucket of parkedBuckets) {
+        if (!bucket.isDirectory()) continue;
+        const parkedBucket = join(parkRoot, bucket.name);
+        let entries;
+        try {
+          entries = await readdir(parkedBucket, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue;
+          const marker = entry.name.indexOf(PARK_MARK);
+          if (marker <= 0) continue;
+          const sessionId = entry.name.slice(0, marker);
+          await this.#settleParkedCopy({
+            sessionId,
+            parked: join(parkedBucket, entry.name),
+            original: join(root, bucket.name, sessionId),
+            external: join(parkedBucket, entry.name),
+            legacy: false,
+            recovered,
+          });
         }
       }
     }
@@ -1999,6 +2042,55 @@ class WorkspaceControl {
     return recovered;
   }
 
+  /**
+   * Decide one parked copy by what the store holds, never by guessing.
+   *
+   * A canonical artifact wins: the copy is dead weight and is removed. Without
+   * one the copy *is* the session, so it is renamed back to the name the
+   * backend expects. A legacy copy whose original path is taken as well is
+   * moved out of the store without deleting it: leaving it there would keep
+   * breaking the listing.
+   */
+  async #settleParkedCopy({ sessionId, parked, original, external, legacy, recovered }) {
+    let canonical = null;
+    try {
+      canonical = await locateArtifact(this.#ctx.sessionPersistence, sessionId);
+    } catch {
+      canonical = null;
+    }
+    try {
+      if (canonical) {
+        if (legacy) {
+          await mkdir(dirname(external), { recursive: true });
+          await rename(parked, external);
+        }
+        await removeDirectory(external);
+        recovered.push({ sessionId, action: 'discarded' });
+        return;
+      }
+      if (await this.#dirExists(original)) {
+        if (!legacy) {
+          recovered.push({ sessionId, action: 'orphan' });
+          return;
+        }
+        await mkdir(dirname(external), { recursive: true });
+        await rename(parked, external);
+        recovered.push({ sessionId, action: 'evicted' });
+        return;
+      }
+      await rename(parked, original);
+      recovered.push({ sessionId, action: 'restored' });
+    } catch (error) {
+      recovered.push({ sessionId, action: 'failed', error: describe(error) });
+    }
+  }
+
+  /** Finish the memberships a previous run could not settle.
+   *
+   * `attachSession` validates the stored header against the registry's cached
+   * header unless the attach is forced to re-read it, and the registry prunes
+   * any id its path index does not account for. Nothing else is touched: the
+   * artifacts already live in the target directory. */
   async resumePending() {
     const list = await readPending();
     if (list.length === 0) return [];
@@ -2263,12 +2355,14 @@ class WorkspaceControl {
       return failure('artifact-missing', 'The stored session file could not be located, so nothing was changed.');
     }
 
-    // Point of no return. The artifact is *parked* beside itself rather than
+    // Point of no return. The artifact is *parked* outside the store rather than
     // deleted, so the id leaves the store exactly once: `create` refuses an id
-    // that still exists, and a failure below restores the parked directory.
-    const sessionDirectory = dirname(artifact);
-    const parkedDirectory = `${sessionDirectory}${PARK_MARK}${Date.now().toString(36)}`;
+    // that still exists, and a failure below restores the parked directory. A
+    // copy inside the store would fail the backend's path-identity check and
+    // take the whole session listing down with it.
+    const { sessionDirectory, parked: parkedDirectory } = parkPlan(artifact);
     try {
+      await mkdir(dirname(parkedDirectory), { recursive: true });
       await rename(sessionDirectory, parkedDirectory);
     } catch (error) {
       return failure('write-failed', `The stored session could not be parked for the move: ${describe(error)}`);

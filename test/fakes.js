@@ -7,7 +7,7 @@
  * and rollback all run against a real filesystem.
  */
 
-import { mkdir, mkdtemp, rm, stat as fsStat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat as fsStat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -57,6 +57,30 @@ export function makePersistence({ home, faults = {} }) {
     published += 1;
   };
 
+  /** A parked copy inside the store is a corrupt artifact for the 0.2.2 backend:
+   * it derives each session's identity from the path, so listing refuses the
+   * whole store instead of skipping the stray directory. */
+  const parkedInsideStore = async () => {
+    const root = join(home, 'sessions');
+    let buckets = [];
+    try {
+      buckets = await readdir(root, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    for (const bucket of buckets) {
+      if (!bucket.isDirectory()) continue;
+      let entries = [];
+      try {
+        entries = await readdir(join(root, bucket.name));
+      } catch {
+        continue;
+      }
+      if (entries.some((name) => name.includes('.workspace-control-parked-'))) return true;
+    }
+    return false;
+  };
+
   return {
     faults,
     store,
@@ -87,6 +111,9 @@ export function makePersistence({ home, faults = {} }) {
       return { header: { ...entry.header }, formatStatus: 'current', eventCount: entry.events.length };
     },
     async list() {
+      if (faults.poisonedByParked && (await parkedInsideStore())) {
+        throw new Error('session persistence listing failed: corrupt session log');
+      }
       const rows = [];
       for (const [id, entry] of store.entries()) {
         if (!(await this.present(id))) continue;
@@ -135,15 +162,31 @@ export function makePersistence({ home, faults = {} }) {
   };
 }
 
-/** Registry fake with the two private index maps the plugin repairs. */
+/**
+ * Registry fake that follows DSH 0.2.2.
+ *
+ * Membership is filtered through a path index and every write prunes the ids
+ * that index does not account for. That prune is the behaviour a stale index
+ * turns into a lost membership, so it has to be modelled rather than papered
+ * over.
+ */
 export function makeRegistry() {
   const records = new Map();
   const headers = new Map();
   const sessionPaths = new Map();
+  const missingSessionPaths = new Set();
   const order = [];
+
+  const accounts = (sessionId, path) =>
+    sessionPaths.get(sessionId) === path || missingSessionPaths.has(sessionId);
 
   const workspace = (id) => {
     const record = records.get(id);
+    /** The shipped mutate: apply the change, then prune unaccounted ids. */
+    const prune = (next) => {
+      next.sessionIds = next.sessionIds.filter((sessionId) => accounts(sessionId, next.path));
+      return next;
+    };
     return Object.freeze({
       id,
       title: record.title,
@@ -151,17 +194,22 @@ export function makeRegistry() {
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:00:00.000Z',
       get sessionIds() {
-        return record.sessionIds.filter((sessionId) => sessionPaths.get(sessionId) === record.path);
+        return record.sessionIds.filter((sessionId) => accounts(sessionId, record.path));
       },
       async setTitle(title) {
         record.title = title;
+        prune(record);
       },
       async attachSession(sessionId) {
+        // A record that already lists the id skips validation and does not
+        // refresh the path, exactly like the shipped registry.
+        if (!record.sessionIds.includes(sessionId)) sessionPaths.set(sessionId, record.path);
         if (!record.sessionIds.includes(sessionId)) record.sessionIds.unshift(sessionId);
-        sessionPaths.set(sessionId, record.path);
+        prune(record);
       },
       async detachSession(sessionId) {
         record.sessionIds = record.sessionIds.filter((entry) => entry !== sessionId);
+        prune(record);
       },
       async status() {
         return 'ok';
@@ -172,6 +220,7 @@ export function makeRegistry() {
   return {
     headers,
     sessionPaths,
+    missingSessionPaths,
     async list() {
       return order.map((id) => workspace(id));
     },

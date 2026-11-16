@@ -91,7 +91,7 @@ Token roles, all theme-aware:
 
 | role | token |
 | --- | --- |
-| page surface, raised surface, skeleton | `--dsw-alias-bg-layer-1`, `--dsw-alias-bg-l2`, `--dsw-alias-bg-skeleton` |
+| page surface, raised surface, skeleton | `--dsw-alias-bg-layer-1`, `--dsw-alias-bg-layer-2`, `--dsw-alias-bg-skeleton` |
 | card fill and stroke | `--dsw-alias-settings-card-fill`, `--dsw-alias-settings-card-stroke` |
 | hover / destructive hover | `--dsw-alias-interactive-bg-hover`, `--dsw-alias-interactive-bg-hover-danger` |
 | text: primary, secondary, muted, error | `--dsw-alias-label-primary`, `-secondary`, `-tertiary`, `--dsw-alias-label-error` |

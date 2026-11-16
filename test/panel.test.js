@@ -281,3 +281,12 @@ test('the settings section renders the manager itself, not a launcher', async ()
   assert.match(css, /\.wsm-root--section \.wsm-title\{display:none\}/);
   assert.match(css, /\.wsm-page--section\{padding-left:0/);
 });
+
+test('the dialog card paints an opaque surface, not a translucent fallback', async () => {
+  const { styles } = await mountPanel(ROWS);
+  const card = styles.join('\n').match(/\.wsm-modalCard\{width:100%[^}]*\}/);
+  assert.ok(card, 'the dialog card has its own rule');
+  assert.match(card[0], /background:var\(--dsw-alias-bg-layer-1,#fff\)/);
+  assert.doesNotMatch(card[0], /rgba\(127,127,127,\.14\)/);
+  assert.match(card[0], /border:\.5px solid var\(--dsw-alias-border-l2/);
+});
